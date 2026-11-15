@@ -4,6 +4,8 @@
 **Last updated:** November 16, 2026  
 **Product name:** Facebook Video Player  
 **Document language:** Indonesian  
+**Bahasa antarmuka web saat ini:** English
+
 
 ## 1. Ringkasan Produk
 
@@ -138,17 +140,18 @@ State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas pro
 
 ## 6. Model Data Target
 
-Relasi dan constraint di bawah adalah rancangan logis. Implementasi database harus menambahkan index, constraint unik, kebijakan penghapusan, dan migration yang sesuai.
+Model berikut sudah didefinisikan di `prisma/schema.prisma` dan migration awal tersedia di `prisma/migrations/0001_initial/migration.sql`. Migration belum diterapkan pada database PostgreSQL, sehingga schema belum diverifikasi terhadap database produksi.
 
-### `User`
+### `User`, `Session`, `Account`, `Verification`
 
-- `id`, `name`, `email` (unik), `passwordHash`, `role`, `createdAt`, `updatedAt`.
-- Tidak menyimpan password plaintext. Hash menggunakan Argon2id atau bcrypt dengan konfigurasi aman.
+- Schema `User` berisi `id`, `name`, `email` (unik), `emailVerified`, `image`, `role` (default `ADMIN`), `createdAt`, dan `updatedAt`.
+- Model `Session`, `Account`, dan `Verification` disiapkan untuk adapter autentikasi.
+- Password tidak disimpan plaintext; kolom `Account.password` disediakan untuk hash yang dikelola oleh pustaka autentikasi. Login, hashing, sesi aktif, dan bootstrap admin belum diimplementasikan.
 
 ### `Video`
 
 - `id`, `title`, `facebookUrl`, `facebookVideoId` nullable, `thumbnailUrl` nullable, `embedStatus`, `createdAt`, `updatedAt`.
-- URL unik per cakupan yang dipilih produk; URL/ID tidak boleh dieksekusi atau dirender sebagai HTML sewenang-wenang.
+- URL memiliki constraint unik global pada instalasi (satu administrator); URL/ID tidak boleh dieksekusi atau dirender sebagai HTML sewenang-wenang.
 
 ### `Playlist`
 
@@ -157,8 +160,8 @@ Relasi dan constraint di bawah adalah rancangan logis. Implementasi database har
 ### `PlaylistVideo`
 
 - `id`, `playlistId`, `videoId`, `position`, `createdAt`.
-- Unique `(playlistId, videoId)` dan index `(playlistId, position)`.
-- Operasi reorder dilakukan secara atomik.
+- Constraint unik `(playlistId, videoId)` dan `(playlistId, position)`, serta index pada `videoId`.
+- Reorder atomik tetap menjadi kebutuhan API; antarmuka saat ini belum menyediakan drag-and-drop atau penyimpanan urutan.
 
 ### `PlaybackSession`
 
@@ -171,12 +174,12 @@ Relasi dan constraint di bawah adalah rancangan logis. Implementasi database har
 
 ### `AppSettings`
 
-- `id`, `autoPlayNext`, `loopPlaylist`, `shufflePlaylist`, `autoplay`, `timezone`, `createdAt`, `updatedAt`.
-- Untuk aplikasi admin tunggal, satu set pengaturan aktif atau di-scope eksplisit kepada administrator.
+- Schema saat ini mencakup `id` (singleton `global`), `autoPlayNext`, `loopPlaylist`, `shufflePlaylist`, `autoplay`, `endBehavior`, `appName`, `timezone`, `dateFormat`, `logRetentionDays`, `createdAt`, dan `updatedAt`.
+- Schema tersedia; halaman Settings saat ini hanya menampilkan preferensi sementara dan beberapa nilai contoh yang read-only.
 
 ### Kepemilikan dan isolasi
 
-Semua query data pengguna harus dibatasi pada pemilik yang berasal dari sesi server. Perubahan pada model “admin tunggal” atau multi-tenant memerlukan keputusan produk eksplisit sebelum diterapkan.
+Rilis awal menggunakan satu administrator per instalasi; model video, playlist, dan pengaturan belum memiliki `userId`. Semua API tetap wajib memeriksa sesi administrator di server. Jika produk berubah menjadi multi-tenant, tambahkan kepemilikan dan scope query sebelum membuka akses tersebut.
 
 ## 7. API Target
 
@@ -236,13 +239,13 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 
 ## 10. Teknologi dan Infrastruktur Target
 
-- UI: Next.js App Router, React, TypeScript, Tailwind CSS, shadcn/ui, Lucide React.
-- Server: Next.js Route Handlers/Server Actions.
-- Data: PostgreSQL dan Prisma ORM sesuai spesifikasi awal.
-- Validasi: Zod.
-- Embed: Facebook JavaScript SDK dan Embedded Video Player API resmi.
+- UI saat ini: Next.js 16 App Router, React 19, TypeScript, Tailwind CSS 4, Lucide React, dan komponen lokal; package shadcn CLI tersedia, tetapi dashboard belum memakai komponen shadcn.
+- Server: halaman dashboard App Router tersedia; Route Handlers/Server Actions untuk data masih target dan belum diimplementasikan.
+- Data target: PostgreSQL melalui Prisma 7 dan `@prisma/adapter-pg`; schema serta adapter sudah ada, tetapi belum tersambung ke database.
+- Validasi: Zod sudah menjadi dependency; validasi server-side belum dibuat. Form video pada preview hanya memeriksa URL di browser.
+- Embed saat ini menggunakan iframe plugin Facebook untuk contoh video; Facebook JavaScript SDK dan event API belum diintegrasikan.
 - Hosting target: Ubuntu VPS, Node.js, environment variables, reverse proxy Nginx; Docker opsional.
-- Rahasia dan konfigurasi hanya berasal dari environment/secret store, tidak di-commit.
+- Header keamanan dasar dikonfigurasi pada Next.js. Rahasia dan konfigurasi hanya berasal dari environment/secret store, tidak di-commit.
 
 ## 11. Deployment VPS
 
@@ -281,7 +284,7 @@ Variabel yang dibutuhkan harus ditentukan final sebelum implementasi deployment,
 
 ## 13. Tahapan Implementasi
 
-1. **Foundation:** setup aplikasi, validasi, PostgreSQL, Prisma, migration, konfigurasi lingkungan.
+1. **Foundation (sebagian):** aplikasi dan UI preview tersedia; schema Prisma, migration awal, adapter PostgreSQL, lint, dan typecheck sudah disiapkan. Koneksi database, penerapan migration, dan konfigurasi environment masih menunggu.
 2. **Authentication:** bootstrap admin, login/logout, sesi aman, perlindungan halaman dan API.
 3. **Dashboard shell:** sidebar responsif, header, dashboard terhubung ke data.
 4. **Content management:** CRUD video, CRUD playlist, detail, pencarian, filter, pagination, reorder.
@@ -291,28 +294,36 @@ Variabel yang dibutuhkan harus ditentukan final sebelum implementasi deployment,
 
 ## 14. Status Implementasi Saat Ini
 
-### Sudah tersedia pada preview
+### Yang tampak pada web preview
 
-- Dashboard shell responsif dengan navigasi Overview, Player, Videos, Playlists, Playback history, dan Settings.
-- UI pustaka video, form tambah video dengan validasi URL di browser, dan hapus dari state sesi.
-- UI playlist dan pemilihan video dalam daftar; kontrol seleksi previous/next pada prototype.
-- Facebook embedded player iframe untuk contoh publik yang dapat di-embed.
-- Banner preview yang menjelaskan data contoh, state sementara, ketiadaan autentikasi, database, dan tracking event.
-- Empty state riwayat tanpa angka view/engagement yang direkayasa.
-- TypeScript diperiksa dan tampilan desktop/mobile diperiksa.
+- Root mengarahkan ke `/dashboard`; satu dashboard responsif memuat Overview, Videos, Playlists, Player, Playback history, dan Settings melalui navigasi sisi desktop serta drawer/overlay mobile.
+- Antarmuka berbahasa Inggris, dengan latar netral terang, panel putih, dan aksen biru.
+- Overview menampilkan jumlah contoh video/playlist, status player idle, aktivitas kosong, playlist, dan quick actions. Nilai tersebut bukan data produksi.
+- Videos menampilkan tabel dengan pencarian browser, tombol filter UI, dialog tambah URL/judul, dan hapus. Validasi URL hanya di browser; perubahan berada dalam React state dan hilang saat refresh. Pagination dan filter belum berfungsi.
+- Playlists mendukung dialog buat, pilih playlist, toggle video, dan hapus pada state lokal. Edit, penyimpanan, detail route, dan reorder belum tersedia.
+- Player menampilkan iframe Facebook untuk URL contoh, playlist selector/queue, pemilihan item, previous/next, dan preferensi sementara. Embed tidak dipastikan tersedia, event lifecycle tidak dilacak, dan auto-advance tidak berjalan.
+- Playback history selalu empty; tombol Search belum terhubung. Settings berisi toggle sesi dan field aplikasi contoh/read-only.
+- UI dengan sengaja menampilkan banner preview dan tidak mengklaim menyimpan data atau merekam view Facebook.
+
+### Fondasi kode yang tersedia di repository
+
+- Prisma 7 schema PostgreSQL dan migration SQL awal untuk autentikasi, video, playlist, playback session/log, serta pengaturan.
+- Prisma PostgreSQL adapter, konfigurasi CLI, `.env.example`, dan script generate/migrate/build telah ditambahkan.
+- Migration SQL dibuat dari schema secara offline dan belum dijalankan terhadap database. Tidak ada koneksi database aktif atau data pengguna.
+- ESLint dan pemeriksaan TypeScript tersedia; Prisma schema valid. Header keamanan dasar dikonfigurasi pada Next.js.
 
 ### Belum tersedia — jangan dianggap production-ready
 
-- PostgreSQL, Prisma schema/migration, API backend, dan persistence.
-- Login, session, admin bootstrap, otorisasi, dan rate limiting.
-- CRUD server-side; perubahan UI saat ini hilang saat reload.
-- Reorder drag-and-drop yang tersimpan.
-- Event listener resmi Facebook yang tervalidasi, auto-advance yang terhubung ke event, dan pencatatan riwayat.
-- Pengaturan yang tersimpan permanen, pengujian end-to-end/produksi, dan konfigurasi deployment VPS.
+- Database PostgreSQL terhubung, migration diterapkan, atau data persisten.
+- Login, sesi autentikasi, bootstrap admin, otorisasi server, dan rate limiting.
+- API backend yang terlindungi; seluruh pengelolaan UI masih lokal/sample.
+- Drag-and-drop reorder, pencarian/filter/pagination server-side, atau pengaturan tersimpan.
+- Event Facebook yang tervalidasi, auto-advance berdasarkan event, dan playback history yang tercatat.
+- Test end-to-end, build/deploy produksi, serta konfigurasi dan runbook VPS.
 
-### Dependency / keputusan yang diperlukan sebelum implementasi backend
+### Konfigurasi yang diperlukan untuk melanjutkan
 
-Pemilik proyek memilih untuk tidak menambahkan integrasi, environment variables, atau menjalankan setup scripts pada tahap ini. Karena itu, backend database dan autentikasi sengaja tidak dibuat atau dipalsukan. Untuk melanjutkan rilis full-stack, minta persetujuan dan siapkan integrasi PostgreSQL, secret autentikasi, serta kebijakan bootstrap admin dan deployment. Setelah tersedia, verifikasi kembali pilihan Prisma dan konfigurasi Facebook terhadap lingkungan target.
+Pemeriksaan konfigurasi proyek terakhir menunjukkan belum ada environment variables. `DATABASE_URL` diperlukan untuk menghubungkan dan memigrasikan PostgreSQL yang dipilih; `BETTER_AUTH_SECRET` diperlukan sebelum konfigurasi Better Auth dibuat. Pengguna melewati prompt setup variabel, jadi migration live, autentikasi, dan API terlindungi belum dijalankan atau dibuat. Nilai rahasia tidak boleh ditulis ke PRD, source code, atau repository; tambahkan melalui Vars proyek sebelum melanjutkan backend.
 
 ## 15. Risiko dan Asumsi
 
