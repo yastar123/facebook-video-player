@@ -1,0 +1,182 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum EmbedStatus {
+  UNVERIFIED
+  EMBEDDABLE
+  FAILED
+}
+
+enum PlaybackSessionStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  STOPPED
+  ERROR
+}
+
+enum PlaybackEventType {
+  SESSION_STARTED
+  VIDEO_LOADED
+  STARTED_PLAYING
+  PAUSED
+  FINISHED_PLAYING
+  NEXT_VIDEO_LOADED
+  SESSION_STOPPED
+  ERROR
+}
+
+model User {
+  id            String    @id
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  role          String    @default("ADMIN")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId             String
+  userId                 String
+  accessToken            String?
+  refreshToken           String?
+  idToken                String?
+  accessTokenExpiresAt   DateTime?
+  refreshTokenExpiresAt  DateTime?
+  scope                  String?
+  password               String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+model Video {
+  id              String               @id @default(cuid())
+  title           String
+  facebookUrl     String               @unique
+  facebookVideoId String?
+  thumbnailUrl    String?
+  embedStatus     EmbedStatus          @default(UNVERIFIED)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  playlistItems   PlaylistVideo[]
+  playbackLogs    PlaybackLog[]
+  currentIn       PlaybackSession[]
+
+  @@index([createdAt])
+  @@index([embedStatus])
+}
+
+model Playlist {
+  id          String            @id @default(cuid())
+  name        String
+  description String?
+  isActive    Boolean           @default(false)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  videos      PlaylistVideo[]
+  sessions    PlaybackSession[]
+
+  @@index([createdAt])
+  @@index([isActive])
+}
+
+model PlaylistVideo {
+  id         String   @id @default(cuid())
+  playlistId String
+  videoId    String
+  position   Int
+  createdAt  DateTime @default(now())
+  playlist  Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@unique([playlistId, videoId])
+  @@unique([playlistId, position])
+  @@index([videoId])
+}
+
+model PlaybackSession {
+  id            String                @id @default(cuid())
+  playlistId    String
+  currentVideoId String?
+  status        PlaybackSessionStatus @default(ACTIVE)
+  startedAt     DateTime              @default(now())
+  endedAt       DateTime?
+  createdAt     DateTime              @default(now())
+  playlist      Playlist              @relation(fields: [playlistId], references: [id], onDelete: Restrict)
+  currentVideo  Video?                @relation(fields: [currentVideoId], references: [id], onDelete: SetNull)
+  logs          PlaybackLog[]
+
+  @@index([playlistId, startedAt])
+  @@index([status])
+}
+
+model PlaybackLog {
+  id        String            @id @default(cuid())
+  sessionId String
+  videoId   String?
+  eventType PlaybackEventType
+  metadata  Json?
+  createdAt DateTime          @default(now())
+  session   PlaybackSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  video     Video?            @relation(fields: [videoId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([sessionId, createdAt])
+  @@index([eventType, createdAt])
+}
+
+model AppSettings {
+  id              String   @id @default("global")
+  autoPlayNext    Boolean  @default(false)
+  loopPlaylist    Boolean  @default(false)
+  shufflePlaylist Boolean  @default(false)
+  autoplay        Boolean  @default(false)
+  endBehavior     String   @default("STOP")
+  appName         String   @default("Facebook Video Player")
+  timezone        String   @default("UTC")
+  dateFormat      String   @default("YYYY-MM-DD")
+  logRetentionDays Int     @default(90)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
