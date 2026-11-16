@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { requireAdmin } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import type { PlaybackActivity, PlaybackPreferences, PlaylistItem, VideoItem } from '@/lib/dashboard-types'
+import { MAX_CONCURRENT_VIDEOS, MIN_CONCURRENT_VIDEOS } from '@/lib/playback-limits'
 
 type ActionResult<T> = { success: true; data: T } | { success: false; message: string }
 
@@ -25,7 +26,7 @@ const preferencesSchema = z.object({
   loop: z.boolean(),
   shuffle: z.boolean(),
   muted: z.boolean(),
-  maxConcurrent: z.number().int().min(2).max(20),
+  maxConcurrent: z.number().int().min(MIN_CONCURRENT_VIDEOS).max(MAX_CONCURRENT_VIDEOS),
 })
 
 function getAllowedFacebookUrl(value: string) {

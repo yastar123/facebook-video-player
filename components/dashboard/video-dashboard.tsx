@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { FacebookVideoEmbed } from './facebook-video-embed'
 import { useDashboardSession } from './dashboard-session'
+import { RuntimeMonitor } from './runtime-monitor'
 import type { PlaybackActivity, PlaybackPreferences, PlaylistItem, VideoItem } from '@/lib/dashboard-types'
 import {
   createPlaylistAction,
@@ -23,6 +24,7 @@ import {
   togglePlaylistVideoAction,
 } from '@/app/dashboard/actions'
 import { logoutAction } from '@/app/login/actions'
+import { MAX_CONCURRENT_VIDEOS, MIN_CONCURRENT_VIDEOS } from '@/lib/playback-limits'
 
 const navGroups = [
   { label: 'Ruang kerja', links: [{ label: 'Ringkasan', href: '/dashboard', icon: Gauge }, { label: 'Pemutar', href: '/dashboard/player', icon: Play }] },
@@ -31,7 +33,10 @@ const navGroups = [
   { label: 'Preferensi', links: [{ label: 'Pengaturan', href: '/dashboard/settings', icon: Settings2 }] },
 ]
 const pageNames: Record<string, string> = { dashboard: 'Ringkasan', videos: 'Video', playlists: 'Daftar putar', player: 'Pemutar', history: 'Riwayat pemutaran', settings: 'Pengaturan' }
-const concurrentPlaybackOptions = Array.from({ length: 19 }, (_, index) => index + 2)
+const concurrentPlaybackOptions = Array.from(
+  { length: MAX_CONCURRENT_VIDEOS - MIN_CONCURRENT_VIDEOS + 1 },
+  (_, index) => index + MIN_CONCURRENT_VIDEOS,
+)
 const activityLabels: Record<string, string> = {
   SESSION_STARTED: 'Sesi dimulai',
   VIDEO_LOADED: 'Video dimuat',
@@ -94,10 +99,11 @@ export function VideoDashboard() {
   const activePlaylist = playlists.find((item) => item.id === selectedPlaylist) ?? playlists[0]
   const playlistVideos = useMemo(() => activePlaylist?.videoIds.map((id) => videos.find((item) => item.id === id)).filter((item): item is VideoItem => Boolean(item)) ?? [], [activePlaylist, videos])
   const currentVideo = playlistVideos[currentIndex]
+  const maxConcurrentVideos = Math.min(preferences.maxConcurrent, MAX_CONCURRENT_VIDEOS)
   const selectedMultiVideos = useMemo(() => {
-    const selectedIds = multiVideoIds ?? playlistVideos.slice(0, preferences.maxConcurrent).map((video) => video.id)
-    return playlistVideos.filter((video) => selectedIds.includes(video.id)).slice(0, preferences.maxConcurrent)
-  }, [multiVideoIds, playlistVideos, preferences.maxConcurrent])
+    const selectedIds = multiVideoIds ?? playlistVideos.slice(0, maxConcurrentVideos).map((video) => video.id)
+    return playlistVideos.filter((video) => selectedIds.includes(video.id)).slice(0, maxConcurrentVideos)
+  }, [multiVideoIds, playlistVideos, maxConcurrentVideos])
   const visibleVideos = videos.filter((item) => `${item.title} ${item.url}`.toLowerCase().includes(search.toLowerCase()))
   const [formError, setFormError] = useState('')
   const [errorNotice, setErrorNotice] = useState('')
@@ -246,7 +252,7 @@ export function VideoDashboard() {
       {notice && <div role="status" className="mb-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800"><span className="flex items-center gap-2"><Check className="size-4" />{notice}</span><button onClick={() => setNotice('')} aria-label="Tutup notifikasi"><X className="size-4" /></button></div>}
       {section === 'videos' ? <VideosPage videos={visibleVideos} search={search} setSearch={setSearch} onAdd={() => { setFormError(''); setDialog('video') }} onRemove={removeVideo} onAddToPlaylist={togglePlaylistVideo} /> : null}
       {section === 'playlists' ? <PlaylistsPage playlists={playlists} videos={videos} selected={selectedPlaylist} onSelect={setSelectedPlaylist} onCreate={() => { setFormError(''); setDialog('playlist') }} onToggleVideo={togglePlaylistVideo} onDelete={removePlaylist} /> : null}
-      {section === 'player' ? <PlayerPage playlists={playlists} activePlaylist={activePlaylist} playlistVideos={playlistVideos} currentVideo={currentVideo} currentIndex={currentIndex} onSelectPlaylist={(id) => { setSelectedPlaylist(id); setCurrentIndex(0); setMultiVideoIds(null) }} onSelectVideo={setCurrentIndex} onNext={() => setCurrentIndex((i) => Math.min(i + 1, playlistVideos.length - 1))} onPrevious={() => setCurrentIndex((i) => Math.max(0, i - 1))} preferences={preferences} setPreferences={updatePreferences} multiView={multiView} setMultiView={setMultiView} selectedMultiVideos={selectedMultiVideos} onVideoReady={(videoId) => { if (activePlaylist) void onVideoReady(activePlaylist.id, videoId) }} onVideoFinished={(videoId) => { void onVideoFinished(videoId) }} onToggleMultiVideo={(id) => setMultiVideoIds((multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).includes(id) ? (multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).filter((videoId) => videoId !== id) : [...(multiVideoIds ?? selectedMultiVideos.map((video) => video.id)), id])} /> : null}
+      {section === 'player' ? <PlayerPage playlists={playlists} activePlaylist={activePlaylist} playlistVideos={playlistVideos} currentVideo={currentVideo} currentIndex={currentIndex} onSelectPlaylist={(id) => { setSelectedPlaylist(id); setCurrentIndex(0); setMultiVideoIds(null) }} onSelectVideo={setCurrentIndex} onNext={() => setCurrentIndex((i) => Math.min(i + 1, playlistVideos.length - 1))} onPrevious={() => setCurrentIndex((i) => Math.max(0, i - 1))} preferences={preferences} setPreferences={updatePreferences} multiView={multiView} setMultiView={setMultiView} selectedMultiVideos={selectedMultiVideos} maxConcurrentVideos={maxConcurrentVideos} onVideoReady={(videoId) => { if (activePlaylist) void onVideoReady(activePlaylist.id, videoId) }} onVideoFinished={(videoId) => { void onVideoFinished(videoId) }} onToggleMultiVideo={(id) => setMultiVideoIds((multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).includes(id) ? (multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).filter((videoId) => videoId !== id) : [...(multiVideoIds ?? selectedMultiVideos.map((video) => video.id)), id])} /> : null}
       {section === 'history' ? <HistoryPage activities={activities} /> : null}
       {section === 'settings' ? <SettingsPage preferences={preferences} setPreferences={updatePreferences} admin={admin} appSettings={appSettings} /> : null}
       {section === 'dashboard' || !pageNames[section] ? <OverviewPage videos={videos} playlists={playlists} activePlaylist={activePlaylist} activities={activities} completedPlaybackCount={completedPlaybackCount} activeSessionCount={activeSessionCount} onAddVideo={() => { setFormError(''); setDialog('video') }} /> : null}
@@ -363,13 +369,17 @@ type PlayerPageProps = {
   multiView: boolean
   setMultiView: (value: boolean) => void
   selectedMultiVideos: VideoItem[]
+  maxConcurrentVideos: number
   onVideoReady: (videoId: string) => void
   onVideoFinished: (videoId: string) => void
   onToggleMultiVideo: (id: string) => void
 }
 
 function PlayerPage(props: PlayerPageProps) {
-  return props.multiView ? <MultiPlayerPage {...props} /> : <SinglePlayerPage {...props} />
+  return <>
+    {props.multiView ? <MultiPlayerPage {...props} /> : <SinglePlayerPage {...props} />}
+    <RuntimeMonitor />
+  </>
 }
 
 function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVideo, currentIndex, onSelectPlaylist, onSelectVideo, onNext, onPrevious, preferences, setPreferences, setMultiView, onVideoReady, onVideoFinished }: PlayerPageProps) {
@@ -402,7 +412,7 @@ function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVi
   </>
 }
 
-function MultiPlayerPage({ playlists, activePlaylist, playlistVideos, currentIndex, onSelectPlaylist, onSelectVideo, preferences, setPreferences, setMultiView, selectedMultiVideos, onToggleMultiVideo }: PlayerPageProps) {
+function MultiPlayerPage({ playlists, activePlaylist, playlistVideos, currentIndex, onSelectPlaylist, onSelectVideo, preferences, setPreferences, setMultiView, selectedMultiVideos, maxConcurrentVideos, onToggleMultiVideo }: PlayerPageProps) {
   const selectedIds = new Set(selectedMultiVideos.map((video) => video.id))
 
   return <>
@@ -452,11 +462,11 @@ function MultiPlayerPage({ playlists, activePlaylist, playlistVideos, currentInd
       </div>
       <div className="flex min-w-0 flex-col gap-4">
         <Panel className="flex min-h-[355px] flex-1 flex-col">
-          <PanelTitle note={`${selectedMultiVideos.length} dari ${preferences.maxConcurrent} terpilih · ${playlistVideos.length} dalam daftar putar`} action={<span className="text-[10px] text-zinc-400">{activePlaylist?.name ?? 'Daftar putar'}</span>}>Reel yang diputar bersamaan</PanelTitle>
+          <PanelTitle note={`${selectedMultiVideos.length} dari ${maxConcurrentVideos} terpilih · ${playlistVideos.length} dalam daftar putar`} action={<span className="text-[10px] text-zinc-400">{activePlaylist?.name ?? 'Daftar putar'}</span>}>Reel yang diputar bersamaan</PanelTitle>
           <div className="flex-1 divide-y divide-zinc-100 overflow-y-auto">
             {playlistVideos.map((video, index) => {
               const selected = selectedIds.has(video.id)
-              const atLimit = !selected && selectedMultiVideos.length >= preferences.maxConcurrent
+              const atLimit = !selected && selectedMultiVideos.length >= maxConcurrentVideos
               return <div key={video.id} className="flex items-center gap-2 px-4 py-3.5 hover:bg-zinc-50">
                 <button onClick={() => onSelectVideo(index)} className={cx('flex min-w-0 flex-1 items-center gap-3 text-left', currentIndex === index && 'text-blue-700')}>
                   <span className={cx('flex size-7 shrink-0 items-center justify-center rounded-md text-[10px] font-medium', currentIndex === index ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-500')}>{index + 1}</span>
@@ -528,7 +538,7 @@ function SettingsPage({ preferences, setPreferences, admin, appSettings }: { pre
           <div className="flex flex-wrap items-center justify-between gap-4 p-5">
             <div>
               <label htmlFor="max-concurrent-reels" className="text-xs font-medium text-zinc-700">Jumlah maksimum Reel bersamaan</label>
-              <p className="mt-1 text-[11px] text-zinc-400">Atur batas 2–20 sematan; pemutaran dan beban sistem bergantung pada Facebook dan peramban Anda.</p>
+              <p className="mt-1 text-[11px] text-zinc-400">Atur batas 2–50 sematan; pemutaran dan beban sistem bergantung pada Facebook dan peramban Anda.</p>
             </div>
             <select
               id="max-concurrent-reels"

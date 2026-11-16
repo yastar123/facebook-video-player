@@ -1,0 +1,2 @@
+export const MAX_CONCURRENT_VIDEOS = 50
+export const MIN_CONCURRENT_VIDEOS = 2

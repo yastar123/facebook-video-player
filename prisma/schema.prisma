@@ -32,6 +32,21 @@ enum PlaybackEventType {
   ERROR
 }
 
+enum RuntimeProcessState {
+  STARTING
+  ONLINE
+  STOPPING
+  OFFLINE
+  ERROR
+}
+
+enum RemoteBrowserState {
+  CLOSED
+  STARTING
+  OPEN
+  CRASHED
+}
+
 model User {
   id            String    @id
   name          String
@@ -189,4 +204,27 @@ model AppSettings {
   logRetentionDays Int     @default(90)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+model RemoteRuntimeStatus {
+  id                 String              @id @default("primary")
+  processState       RuntimeProcessState @default(OFFLINE)
+  browserState       RemoteBrowserState  @default(CLOSED)
+  chromiumVersion    String?
+  processStartedAt   DateTime?
+  browserStartedAt   DateTime?
+  lastHeartbeatAt    DateTime?
+  currentPage        String?
+  lastError          String?
+  updatedAt          DateTime            @updatedAt
+}
+
+model RemoteRuntimeLog {
+  id        String   @id @default(cuid())
+  level     String
+  event     String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }

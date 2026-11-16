@@ -3,6 +3,7 @@ import 'server-only'
 import { prisma } from '@/lib/prisma'
 import type { AdminIdentity } from '@/lib/auth'
 import type { DashboardInitialData } from '@/lib/dashboard-types'
+import { MAX_CONCURRENT_VIDEOS, MIN_CONCURRENT_VIDEOS } from '@/lib/playback-limits'
 
 function displayDate(date: Date) {
   return new Intl.DateTimeFormat('id-ID', {
@@ -55,7 +56,7 @@ export async function getDashboardInitialData(admin: AdminIdentity): Promise<Das
       loop: settings.loopPlaylist,
       shuffle: settings.shufflePlaylist,
       muted: settings.muted,
-      maxConcurrent: settings.maxConcurrent,
+      maxConcurrent: Math.min(MAX_CONCURRENT_VIDEOS, Math.max(MIN_CONCURRENT_VIDEOS, settings.maxConcurrent)),
     },
     activities: activities.map((activity) => ({
       id: activity.id,

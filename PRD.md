@@ -119,6 +119,15 @@ State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas pro
 - Pengaturan akun: nama administrator, email, ubah password, dan logout.
 - Semua pengaturan tersimpan di PostgreSQL dan dibatasi pada administrator.
 
+### 4.8 Remote Browser Runtime
+
+- Runtime service terpisah di VPS dikelola PM2; prosesnya tetap berjalan saat browser administrator ditutup.
+- `/dashboard/player` menampilkan status service, Chromium, versi browser, uptime, heartbeat, halaman saat ini, error terakhir, dan log diagnostik.
+- Kontrol administrator memulai, menghentikan, memulai ulang Chromium, atau meminta health check melalui route server yang memeriksa sesi.
+- API runtime hanya bind ke loopback dan memerlukan secret bersama antara aplikasi dan service.
+- Runtime hanya membuka halaman kosong untuk pemeriksaan operasional. Runtime tidak membuka atau memutar embed Facebook, tidak mencatat `PlaybackSession`/`PlaybackLog`, dan status runtime bukan status playback.
+- Pemutar Facebook existing tetap berjalan di browser dashboard; event hanya dicatat oleh integrasi embed existing jika benar-benar diamati.
+
 ## 5. Navigasi dan Desain UX
 
 ### Navigasi utama
@@ -140,7 +149,7 @@ State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas pro
 
 ## 6. Model Data Target
 
-Model berikut didefinisikan di `prisma/schema.prisma`. Migration awal tersedia di `prisma/migrations/0001_initial/migration.sql`; migration berikutnya menambahkan preferensi tersimpan dan pembatasan percobaan login. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
+Model berikut didefinisikan di `prisma/schema.prisma`. Lima migration tersedia di `prisma/migrations/0001_initial` hingga `0005_remote_browser_runtime`. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
 
 ### `User`, `Session`, `Account`, `Verification`
 
@@ -177,6 +186,12 @@ Model berikut didefinisikan di `prisma/schema.prisma`. Migration awal tersedia d
 
 - Schema saat ini mencakup `id` (singleton `global`), `autoPlayNext`, `loopPlaylist`, `shufflePlaylist`, `autoplay`, `muted`, `maxConcurrent`, `endBehavior`, `appName`, `timezone`, `dateFormat`, `logRetentionDays`, `createdAt`, dan `updatedAt`.
 - Toggle preferensi pemutaran dan batas pemutaran serentak disimpan; pengaturan identitas aplikasi masih read-only.
+
+### `RemoteRuntimeStatus`, `RemoteRuntimeLog`
+
+- `RemoteRuntimeStatus` menyimpan status proses dan browser, versi Chromium, waktu mulai, heartbeat terakhir, halaman browser, dan error terakhir.
+- `RemoteRuntimeLog` menyimpan event operasional yang sudah disanitasi; bukan event playback.
+- Log runtime dibatasi ke 200 baris terbaru.
 
 ### Kepemilikan dan isolasi
 
@@ -218,6 +233,12 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 
 - `GET /api/settings` dan `PATCH /api/settings`.
 
+### Remote runtime
+
+- `GET /api/admin/runtime` membaca status runtime untuk administrator.
+- `POST /api/admin/runtime` menerima `start`, `stop`, `restart`, atau `health`, dengan sesi admin dan pemeriksaan origin.
+- Backend meneruskan perintah hanya ke `127.0.0.1:RUNTIME_PORT`; endpoint internal membutuhkan bearer token dan tidak diekspos melalui Nginx.
+
 ## 8. Facebook Embed dan Batas Integrasi
 
 - Gunakan Facebook Embedded Video Player/JavaScript SDK resmi dan dokumentasi resmi API sebagai sumber kebenaran.
@@ -245,6 +266,7 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 - Data: PostgreSQL melalui Prisma 7 dan `@prisma/adapter-pg`; deployment harus menerapkan migration dengan `prisma migrate deploy`.
 - Validasi: input login, URL, playlist, dan preferensi divalidasi server-side dengan Zod. URL video dibatasi HTTPS dan host Facebook yang didukung.
 - Embed menggunakan Facebook JavaScript SDK; event `xfbml.ready` dan `finishedPlaying` dicatat hanya pada pemutar tunggal.
+- Remote Browser Runtime menggunakan proses Node terpisah, Playwright/Chromium headless, PM2, heartbeat PostgreSQL, dan recovery terbatas saat Chromium crash. Runtime tidak mengotomatiskan playback.
 - Hosting target: Ubuntu VPS, Node.js, environment variables, reverse proxy Nginx; Docker opsional.
 - Header keamanan dasar dikonfigurasi pada Next.js. Rahasia dan konfigurasi hanya berasal dari environment/secret store, tidak di-commit.
 
@@ -255,6 +277,18 @@ Rencana deployment harus mencakup: checkout kode, instalasi dependency yang terk
 Variabel yang dibutuhkan harus ditentukan final sebelum implementasi deployment, sekurangnya koneksi database, secret sesi/auth, URL canonical aplikasi bila diperlukan, serta variabel Facebook hanya bila SDK resmi memerlukannya. Nilai rahasia tidak boleh dimasukkan dalam dokumentasi atau repository.
 
 Untuk database existing yang tabelnya dibuat sebelum Prisma migration history tersedia, backup dahulu dan pastikan schema cocok dengan `0001_initial`. Setelah itu jalankan `npx prisma migrate resolve --applied 0001_initial` satu kali untuk baseline, lalu `npx prisma migrate deploy` untuk menerapkan migration baru. Database kosong sebaiknya langsung menggunakan `npx prisma migrate deploy`. Jangan gunakan `prisma db push` pada deployment produksi.
+
+### Remote Browser Runtime (Ubuntu VPS)
+
+1. Tambahkan `RUNTIME_PORT=3012` dan secret acak minimal 32 karakter sebagai `RUNTIME_API_TOKEN` di secret store/.env server. Aplikasi Next.js dan PM2 runtime harus membaca nilai token yang sama. Jangan masukkan nilainya ke Git atau log.
+2. Pastikan migrasi yang tersedia sudah tercatat, lalu jalankan `npm run db:migrate:deploy` dan `npm run db:generate`.
+3. Instal dependency proyek dan OS untuk Chromium: `pnpm install --frozen-lockfile` (atau `npm install` sesuai prosedur server), `npx playwright install-deps chromium`, lalu jalankan `npx playwright install chromium` sebagai user aplikasi.
+4. Jalankan proses runtime sebagai user Linux non-root agar sandbox Chromium tetap aktif. Runtime menolak berjalan sebagai root dan tidak memakai `--no-sandbox`.
+5. Instal PM2 (`npm install -g pm2`), lalu sebagai user aplikasi jalankan `pm2 start ecosystem.config.cjs --only facebook-video-player-runtime`, `pm2 save`, dan ikuti perintah `pm2 startup` untuk user tersebut.
+6. Restart proses Next.js existing setelah environment/migration siap. Jangan menambah port 3012 ke Nginx/firewall; service bind hanya ke `127.0.0.1`.
+7. Periksa status melalui `/dashboard/player`, dan gunakan `pm2 status`, `pm2 logs facebook-video-player-runtime --lines 100` untuk operasi VPS.
+
+PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihkan Chromium maksimal tiga kali dalam lima menit. Tombol Start/Stop/Restart mengendalikan sesi Chromium, bukan menghentikan daemon PM2, agar dashboard tetap dapat menghubunginya. Restart service Next.js tidak diperlukan untuk mengendalikan browser. Runtime service yang online membuka halaman kosong saja—bukan embed, bukan playback, dan bukan view Facebook. Browser administrator dapat ditutup tanpa menghentikan service; pemutar Facebook existing tetap memerlukan halaman browser dashboard terbuka.
 
 ## 12. Kriteria Penerimaan Rilis Produksi
 
@@ -284,16 +318,19 @@ Untuk database existing yang tabelnya dibuat sebelum Prisma migration history te
 - TypeScript, lint/test yang tersedia, dan production build lolos.
 - Layout dan alur penting diuji pada desktop, tablet, dan mobile.
 - Backup, restore, HTTPS, environment secrets, dan prosedur deployment VPS terdokumentasi dan diuji.
+- Runtime API hanya dapat dicapai melalui loopback dan memerlukan autentikasi admin di sisi Next.js serta secret service-ke-service.
+- Status runtime/browser, heartbeat, uptime, Chromium version, recovery, dan error dibedakan dari embed/playback; runtime tidak membuat event playback.
 
 ## 13. Tahapan Implementasi
 
-1. **Foundation (sebagian):** schema Prisma, adapter PostgreSQL, dan tiga migration tersedia; penerapan migration produksi masih perlu dilakukan.
+1. **Foundation (sebagian):** schema Prisma, adapter PostgreSQL, dan lima migration tersedia; penerapan migration produksi masih perlu dilakukan.
 2. **Authentication (implementasi awal):** login/logout, sesi database, proteksi halaman/mutasi, dan pembatasan percobaan login tersedia.
 3. **Dashboard shell:** dashboard membaca ringkasan dari PostgreSQL.
 4. **Content management (sebagian):** tambah/hapus video, playlist, dan keanggotaan video tersimpan; edit, filter, pagination, serta reorder belum tersedia.
 5. **Facebook player (sebagian):** embed resmi dipakai; event yang tersedia pada pemutar tunggal dicatat.
 6. **History and settings (sebagian):** riwayat event pemutar tunggal dan preferensi dasar tersimpan; filter riwayat dan semua pengaturan aplikasi belum tersedia.
-7. **Production:** pengujian end-to-end, penerapan migration, deployment VPS, dan runbook masih perlu diverifikasi.
+7. **Remote runtime:** service Playwright/Chromium, kontrol, status, heartbeat, recovery terbatas, dan persistence PostgreSQL tersedia; deployment serta PM2 startup pada VPS masih perlu diverifikasi.
+8. **Production:** pengujian end-to-end, penerapan migration, deployment VPS, dan runbook masih perlu diverifikasi.
 
 ## 14. Status Implementasi Saat Ini
 
@@ -303,23 +340,28 @@ Untuk database existing yang tabelnya dibuat sebelum Prisma migration history te
 - Dashboard memuat video, playlist, pengaturan, dan ringkasan aktivitas dari PostgreSQL melalui Prisma. Mutasi dilakukan dengan Server Actions yang memeriksa sesi dan memvalidasi input.
 - Video dapat ditambahkan/dihapus; playlist dapat dibuat/dihapus dan item video dapat ditambahkan/dikeluarkan. Preferensi pemutaran disimpan di `AppSettings`.
 - Pemutar tunggal mencatat `SESSION_STARTED`, `VIDEO_LOADED`, `NEXT_VIDEO_LOADED`, `FINISHED_PLAYING`, dan `SESSION_STOPPED` saat event yang didukung diamati. Ini bukan statistik tayangan Facebook.
-- Migration `0002_persist_playback_preferences` menambahkan kolom preferensi yang tidak ada pada skema awal; `0003_login_attempt_rate_limit` menambahkan tabel pembatasan login.
+- Remote runtime terpisah tersedia melalui `runtime/server.ts` dan konfigurasi PM2. Kontrolnya mengelola browser Chromium kosong dan health operasional; tidak menjalankan embed atau menulis event playback.
+- `/api/admin/runtime` memeriksa sesi admin, memvalidasi perintah, melakukan origin check pada mutasi, dan mem-proxy ke service loopback dengan bearer token.
+- Migration `0002`–`0004` mengubah preferensi, rate limit login, dan URL duplikat; `0005_remote_browser_runtime` menambahkan status serta log operasional runtime.
 
 ### Belum tersedia
 
 - Edit metadata video/playlist, drag-and-drop reorder, filter/pagination, dan pengaturan aplikasi yang dapat diedit.
 - Pencatatan lifecycle pemutaran untuk tampilan serentak; hanya event pemutar tunggal yang dicatat.
 - Pengujian end-to-end dan konfigurasi rate-limit yang mempercayai IP dari reverse proxy harus diverifikasi pada VPS.
-- Migration produksi belum dijalankan otomatis dari repository ini. VPS harus dibackup dan menyiapkan migration baseline untuk tabel yang telah ada sebelum menerapkan `0002`.
+- Runtime service dan Chromium/PM2 belum dijalankan atau diuji pada VPS ini; perlu dependency OS, user non-root, secret, dan migrasi deploy.
+- Remote runtime tidak membuka Facebook embed dan tidak memainkan video setelah browser administrator ditutup. Pemutar embed existing tetap memerlukan tab browser terbuka.
 
 ### Konfigurasi dan deployment
 
-Sediakan `DATABASE_URL`, `BETTER_AUTH_SECRET` (minimal 32 karakter), `ADMIN_EMAIL`, dan `ADMIN_PASSWORD` melalui environment/secret store server. Untuk database existing tanpa tabel `_prisma_migrations`, pastikan schema cocok dengan `0001_initial`, jalankan `npx prisma migrate resolve --applied 0001_initial` satu kali, lalu `npx prisma migrate deploy` untuk `0002` dan `0003`. Jangan menyimpan kredensial produksi di `.env.example`, source code, atau repository.
+Sediakan `DATABASE_URL`, `BETTER_AUTH_SECRET` (minimal 32 karakter), `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `RUNTIME_PORT`, dan `RUNTIME_API_TOKEN` melalui environment/secret store server. Untuk database existing tanpa tabel `_prisma_migrations`, backup dan baseline `0001_initial` hanya setelah memastikan skema cocok; lalu jalankan `npx prisma migrate deploy` untuk seluruh migration yang belum diterapkan. Jangan menyimpan kredensial produksi di `.env.example`, source code, atau repository.
 
 ## 15. Risiko dan Asumsi
 
 - Facebook dapat mengubah API, kebijakan, atau ketersediaan embed; integrasi harus diverifikasi ulang saat implementasi.
 - Autoplay dipengaruhi gesture pengguna, audio, browser, dan Facebook; UI harus selalu memiliki fallback manual.
+- Remote Browser Runtime hanya menyediakan lifecycle Chromium dan health operasional. Browser runtime saat ini tidak terintegrasi untuk memuat Facebook embed; menutup browser administrator tidak menghentikan daemon, tetapi juga tidak membuat video terus diputar.
+- Kehidupan service PM2, status browser, ketersediaan embed, dan playback adalah status terpisah. Hanya sinyal dari player existing yang boleh menjadi event `PlaybackLog`.
 - URL yang valid tidak membuktikan video dapat di-embed; status awal harus “belum diverifikasi” kecuali ada pemeriksaan yang sah.
 - Log aplikasi bukan analitik Facebook dan dapat tidak lengkap jika event tidak dikirim oleh embed.
 - Belum ada keputusan mengenai retensi log, single-admin versus multi-admin, kebijakan backup, serta domain production.
