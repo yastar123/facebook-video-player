@@ -28,10 +28,6 @@ const preferencesSchema = z.object({
   maxConcurrent: z.number().int().min(2).max(20),
 })
 
-function isUniqueConstraintError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002'
-}
-
 function getAllowedFacebookUrl(value: string) {
   try {
     const url = new URL(value)
@@ -66,18 +62,13 @@ export async function createVideoAction(input: { url: string; title: string }): 
   const facebookUrl = getAllowedFacebookUrl(parsed.data.url)
   if (!facebookUrl) return { success: false, message: 'Gunakan URL HTTPS dari Facebook atau fb.watch.' }
 
-  try {
-    const video = await prisma.video.create({
-      data: {
-        facebookUrl,
-        title: parsed.data.title || 'Video Facebook tanpa judul',
-      },
-    })
-    return { success: true, data: videoRecordToItem(video) }
-  } catch (error) {
-    if (isUniqueConstraintError(error)) return { success: false, message: 'URL video tersebut sudah ada di pustaka.' }
-    throw error
-  }
+  const video = await prisma.video.create({
+    data: {
+      facebookUrl,
+      title: parsed.data.title || 'Video Facebook tanpa judul',
+    },
+  })
+  return { success: true, data: videoRecordToItem(video) }
 }
 
 export async function deleteVideoAction(id: string): Promise<ActionResult<null>> {

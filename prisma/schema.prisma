@@ -101,7 +101,7 @@ model LoginAttempt {
 model Video {
   id              String               @id @default(cuid())
   title           String
-  facebookUrl     String               @unique
+  facebookUrl     String
   facebookVideoId String?
   thumbnailUrl    String?
   embedStatus     EmbedStatus          @default(UNVERIFIED)
