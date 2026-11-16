@@ -5,6 +5,7 @@ import { requireAdmin } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import type { PlaybackActivity, PlaybackPreferences, PlaylistItem, VideoItem } from '@/lib/dashboard-types'
 import { MAX_CONCURRENT_VIDEOS, MIN_CONCURRENT_VIDEOS } from '@/lib/playback-limits'
+import { PLAYBACK_SESSION_ACTIVE_WINDOW_MS } from '@/lib/playback-session'
 
 type ActionResult<T> = { success: true; data: T } | { success: false; message: string }
 
@@ -205,7 +206,7 @@ export async function startPlaybackAction(
       if (session.currentVideoId === videoId) return { sessionId: session.id, activeDelta, activities }
       await transaction.playbackSession.update({
         where: { id: session.id },
-        data: { currentVideoId: videoId },
+        data: { currentVideoId: videoId, lastHeartbeatAt: new Date() },
       })
       const event = await transaction.playbackLog.create({
         data: { sessionId: session.id, videoId, eventType: 'NEXT_VIDEO_LOADED' },
@@ -262,6 +263,30 @@ export async function startPlaybackAction(
 
   if (!result) return { success: false, message: 'Video tidak ditemukan di daftar putar tersebut.' }
   return { success: true, data: result }
+}
+
+export async function syncPlaybackSessionsAction(sessionId: string | null): Promise<ActionResult<number>> {
+  await requireAdmin()
+  if (sessionId !== null && !idSchema.safeParse(sessionId).success) {
+    return { success: false, message: 'Sesi pemutaran tidak valid.' }
+  }
+
+  const now = new Date()
+  const activeSince = new Date(now.getTime() - PLAYBACK_SESSION_ACTIVE_WINDOW_MS)
+  const activeSessionCount = await prisma.$transaction(async (transaction) => {
+    if (sessionId) {
+      await transaction.playbackSession.updateMany({
+        where: { id: sessionId, status: 'ACTIVE' },
+        data: { lastHeartbeatAt: now },
+      })
+    }
+
+    return transaction.playbackSession.count({
+      where: { status: 'ACTIVE', lastHeartbeatAt: { gte: activeSince } },
+    })
+  })
+
+  return { success: true, data: activeSessionCount }
 }
 
 export async function finishPlaybackAction(sessionId: string, videoId: string): Promise<ActionResult<PlaybackActivity | null>> {

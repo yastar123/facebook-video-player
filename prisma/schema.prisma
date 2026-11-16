@@ -164,6 +164,7 @@ model PlaybackSession {
   currentVideoId String?
   status        PlaybackSessionStatus @default(ACTIVE)
   startedAt     DateTime              @default(now())
+  lastHeartbeatAt DateTime            @default(now())
   endedAt       DateTime?
   createdAt     DateTime              @default(now())
   playlist      Playlist              @relation(fields: [playlistId], references: [id], onDelete: Restrict)
@@ -172,6 +173,7 @@ model PlaybackSession {
 
   @@index([playlistId, startedAt])
   @@index([status])
+  @@index([status, lastHeartbeatAt])
 }
 
 model PlaybackLog {

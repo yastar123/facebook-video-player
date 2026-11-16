@@ -149,7 +149,7 @@ State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas pro
 
 ## 6. Model Data Target
 
-Model berikut didefinisikan di `prisma/schema.prisma`. Lima migration tersedia di `prisma/migrations/0001_initial` hingga `0005_remote_browser_runtime`. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
+Model berikut didefinisikan di `prisma/schema.prisma`. Enam migration tersedia di `prisma/migrations/0001_initial` hingga `0006_playback_session_heartbeat`. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
 
 ### `User`, `Session`, `Account`, `Verification`
 
@@ -175,7 +175,8 @@ Model berikut didefinisikan di `prisma/schema.prisma`. Lima migration tersedia d
 
 ### `PlaybackSession`
 
-- `id`, `playlistId`, `currentVideoId` nullable, `status`, `startedAt`, `endedAt` nullable, `createdAt`.
+- `id`, `playlistId`, `currentVideoId` nullable, `status`, `startedAt`, `lastHeartbeatAt`, `endedAt` nullable, `createdAt`.
+- Ringkasan hanya menghitung sesi dengan heartbeat dalam lima menit terakhir; heartbeat menandakan tab pemutar masih terhubung, bukan bahwa video Facebook sedang diputar.
 
 ### `PlaybackLog`
 
@@ -265,7 +266,7 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 - Server: Server Actions terautentikasi menangani video, playlist, preferensi, dan event pemutaran; layout dashboard memuat data melalui Prisma.
 - Data: PostgreSQL melalui Prisma 7 dan `@prisma/adapter-pg`; deployment harus menerapkan migration dengan `prisma migrate deploy`.
 - Validasi: input login, URL, playlist, dan preferensi divalidasi server-side dengan Zod. URL video dibatasi HTTPS dan host Facebook yang didukung.
-- Embed menggunakan Facebook JavaScript SDK; event `xfbml.ready` dan `finishedPlaying` dicatat hanya pada pemutar tunggal.
+- Embed menggunakan Facebook JavaScript SDK; event `xfbml.ready` dan `finishedPlaying` dicatat hanya pada pemutar tunggal. Pengulangan satu-video tetap melakukan seek/play ketika `autoPlayNext` dan loop aktif bersamaan.
 - Remote Browser Runtime menggunakan proses Node terpisah, Playwright/Chromium headless, PM2, heartbeat PostgreSQL, dan recovery terbatas saat Chromium crash. Runtime tidak mengotomatiskan playback.
 - Hosting target: Ubuntu VPS, Node.js, environment variables, reverse proxy Nginx; Docker opsional.
 - Header keamanan dasar dikonfigurasi pada Next.js. Rahasia dan konfigurasi hanya berasal dari environment/secret store, tidak di-commit.
@@ -323,7 +324,7 @@ PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihka
 
 ## 13. Tahapan Implementasi
 
-1. **Foundation (sebagian):** schema Prisma, adapter PostgreSQL, dan lima migration tersedia; penerapan migration produksi masih perlu dilakukan.
+1. **Foundation (sebagian):** schema Prisma, adapter PostgreSQL, dan enam migration tersedia; penerapan migration produksi masih perlu dilakukan.
 2. **Authentication (implementasi awal):** login/logout, sesi database, proteksi halaman/mutasi, dan pembatasan percobaan login tersedia.
 3. **Dashboard shell:** dashboard membaca ringkasan dari PostgreSQL.
 4. **Content management (sebagian):** tambah/hapus video, playlist, dan keanggotaan video tersimpan; edit, filter, pagination, serta reorder belum tersedia.
@@ -342,14 +343,14 @@ PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihka
 - Pemutar tunggal mencatat `SESSION_STARTED`, `VIDEO_LOADED`, `NEXT_VIDEO_LOADED`, `FINISHED_PLAYING`, dan `SESSION_STOPPED` saat event yang didukung diamati. Ini bukan statistik tayangan Facebook.
 - Remote runtime terpisah tersedia melalui `runtime/server.ts` dan konfigurasi PM2. Kontrolnya mengelola browser Chromium kosong dan health operasional; tidak menjalankan embed atau menulis event playback.
 - `/api/admin/runtime` memeriksa sesi admin, memvalidasi perintah, melakukan origin check pada mutasi, dan mem-proxy ke service loopback dengan bearer token.
-- Migration `0002`–`0004` mengubah preferensi, rate limit login, dan URL duplikat; `0005_remote_browser_runtime` menambahkan status serta log operasional runtime.
+- Migration `0002`–`0004` mengubah preferensi, rate limit login, dan URL duplikat; `0005_remote_browser_runtime` menambahkan status serta log operasional runtime; `0006_playback_session_heartbeat` menyinkronkan jumlah sesi melalui heartbeat.
 
 ### Belum tersedia
 
 - Edit metadata video/playlist, drag-and-drop reorder, filter/pagination, dan pengaturan aplikasi yang dapat diedit.
 - Pencatatan lifecycle pemutaran untuk tampilan serentak; hanya event pemutar tunggal yang dicatat.
 - Pengujian end-to-end dan konfigurasi rate-limit yang mempercayai IP dari reverse proxy harus diverifikasi pada VPS.
-- Runtime service dan Chromium/PM2 belum dijalankan atau diuji pada VPS ini; perlu dependency OS, user non-root, secret, dan migrasi deploy.
+- Runtime dan Chromium telah berhasil dijalankan pada VPS Rocky Linux 8 sebagai user non-root; konfigurasi PM2 untuk startup setelah reboot masih perlu diverifikasi.
 - Remote runtime tidak membuka Facebook embed dan tidak memainkan video setelah browser administrator ditutup. Pemutar embed existing tetap memerlukan tab browser terbuka.
 
 ### Konfigurasi dan deployment

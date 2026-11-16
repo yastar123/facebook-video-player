@@ -4,6 +4,7 @@ import { prisma } from '@/lib/prisma'
 import type { AdminIdentity } from '@/lib/auth'
 import type { DashboardInitialData } from '@/lib/dashboard-types'
 import { MAX_CONCURRENT_VIDEOS, MIN_CONCURRENT_VIDEOS } from '@/lib/playback-limits'
+import { PLAYBACK_SESSION_ACTIVE_WINDOW_MS } from '@/lib/playback-session'
 
 function displayDate(date: Date) {
   return new Intl.DateTimeFormat('id-ID', {
@@ -15,6 +16,7 @@ function displayDate(date: Date) {
 }
 
 export async function getDashboardInitialData(admin: AdminIdentity): Promise<DashboardInitialData> {
+  const activeSessionSince = new Date(Date.now() - PLAYBACK_SESSION_ACTIVE_WINDOW_MS)
   const settings = await prisma.appSettings.upsert({
     where: { id: 'global' },
     create: { id: 'global' },
@@ -33,7 +35,9 @@ export async function getDashboardInitialData(admin: AdminIdentity): Promise<Das
       include: { video: { select: { title: true } }, session: { include: { playlist: { select: { name: true } } } } },
     }),
     prisma.playbackLog.count({ where: { eventType: 'FINISHED_PLAYING' } }),
-    prisma.playbackSession.count({ where: { status: 'ACTIVE' } }),
+    prisma.playbackSession.count({
+      where: { status: 'ACTIVE', lastHeartbeatAt: { gte: activeSessionSince } },
+    }),
   ])
 
   return {

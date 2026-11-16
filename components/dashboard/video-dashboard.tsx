@@ -21,10 +21,13 @@ import {
   savePreferencesAction,
   startPlaybackAction,
   stopPlaybackAction,
+  syncPlaybackSessionsAction,
   togglePlaylistVideoAction,
 } from '@/app/dashboard/actions'
 import { logoutAction } from '@/app/login/actions'
 import { MAX_CONCURRENT_VIDEOS, MIN_CONCURRENT_VIDEOS } from '@/lib/playback-limits'
+import { PLAYBACK_SESSION_HEARTBEAT_INTERVAL_MS } from '@/lib/playback-session'
+import { handlePlaybackFinished } from '@/lib/playback-flow'
 
 const navGroups = [
   { label: 'Ruang kerja', links: [{ label: 'Ringkasan', href: '/dashboard', icon: Gauge }, { label: 'Pemutar', href: '/dashboard/player', icon: Play }] },
@@ -107,6 +110,33 @@ export function VideoDashboard() {
   const visibleVideos = videos.filter((item) => `${item.title} ${item.url}`.toLowerCase().includes(search.toLowerCase()))
   const [formError, setFormError] = useState('')
   const [errorNotice, setErrorNotice] = useState('')
+
+  useEffect(() => {
+    let syncing = false
+    const synchronizeSessions = async () => {
+      if (syncing) return
+      syncing = true
+      try {
+        const result = await syncPlaybackSessionsAction(playbackSessionId.current)
+        if (!result.success) {
+          setErrorNotice(result.message)
+          return
+        }
+        setActiveSessionCount(result.data)
+      } catch {
+        setErrorNotice('Status sesi pemutaran tidak dapat disinkronkan.')
+      } finally {
+        syncing = false
+      }
+    }
+
+    void synchronizeSessions()
+    const intervalId = window.setInterval(
+      () => void synchronizeSessions(),
+      PLAYBACK_SESSION_HEARTBEAT_INTERVAL_MS,
+    )
+    return () => window.clearInterval(intervalId)
+  }, [setActiveSessionCount])
 
   async function addVideo(form: FormData) {
     const url = String(form.get('url') ?? '').trim()
@@ -277,7 +307,7 @@ function OverviewPage({ videos, playlists, activePlaylist, activities, completed
         { label: 'Video di pustaka', value: videos.length.toString(), meta: 'Tersimpan', icon: Film },
         { label: 'Daftar putar', value: playlists.length.toString(), meta: 'Tersimpan', icon: ListMusic },
         { label: 'Video selesai', value: completedPlaybackCount.toString(), meta: 'Event aplikasi', icon: Activity },
-        { label: 'Sesi pemutar aktif', value: activeSessionCount.toString(), meta: 'Saat ini', icon: AudioLines },
+        { label: 'Sesi pemutar terhubung', value: activeSessionCount.toString(), meta: 'Heartbeat <5 mnt', icon: AudioLines },
       ].map(({ label, value, meta, icon: Icon }) => <Panel key={label} className="p-4"><div className="flex items-center justify-between"><span className="text-xs font-medium text-zinc-500">{label}</span><Icon className="size-4 text-zinc-400" /></div><div className="mt-4 flex items-end justify-between"><span className="text-[27px] font-semibold tracking-[-.05em] text-zinc-900">{value}</span><span className="mb-1 text-[10px] text-zinc-400">{meta}</span></div></Panel>)}
     </div>
     <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_1fr]">
@@ -395,15 +425,18 @@ function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVi
       onReady={() => { if (currentVideo) onVideoReady(currentVideo.id) }}
       onFinished={(player) => {
         if (currentVideo) onVideoFinished(currentVideo.id)
-        if (!preferences.autoPlayNext) {
-          if (preferences.loop) {
+        handlePlaybackFinished({
+          autoPlayNext: preferences.autoPlayNext,
+          loop: preferences.loop,
+          currentIndex,
+          playlistLength: playlistVideos.length,
+          replayCurrent: () => {
             player.seek(0)
             player.play()
-          }
-          return
-        }
-        if (currentIndex < playlistVideos.length - 1) onNext()
-        else if (preferences.loop && playlistVideos.length) onSelectVideo(0)
+          },
+          playNext: onNext,
+          restartPlaylist: () => onSelectVideo(0),
+        })
       }}
     /> : <div className="px-6 text-center text-white"><Film className="mx-auto mb-3 size-8 text-zinc-500" /><p className="text-sm font-medium">{currentVideo ? 'Tautan ini perlu diperiksa sebelum disematkan di Facebook' : 'Pilih video untuk memulai'}</p><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-zinc-400">Privasi video dan pengaturan penerbit menentukan apakah Facebook mengizinkan sematan ini diputar.</p></div>}</div><div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 px-4 py-3.5"><div className="min-w-0"><p className="truncate text-xs font-semibold text-zinc-800">{currentVideo?.title ?? 'Belum ada video yang dipilih'}</p><p className="mt-1 text-[10px] text-zinc-400">{activePlaylist?.name ?? 'Belum ada daftar putar'} · {playlistVideos.length ? `${currentIndex + 1} dari ${playlistVideos.length}` : '0 video'}</p></div><div className="flex items-center gap-1"><Button variant="quiet" disabled={currentIndex === 0} onClick={onPrevious}><SkipBack className="size-4" /><span className="sr-only">Video sebelumnya</span></Button><Button variant="quiet" disabled={currentIndex >= playlistVideos.length - 1} onClick={onNext}><SkipForward className="size-4" /><span className="sr-only">Video berikutnya</span></Button></div></div></Panel>
       <div className="mt-3 flex items-start gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2.5 text-[11px] leading-5 text-blue-800"><CircleHelp className="mt-0.5 size-3.5 shrink-0" /><p>Putar otomatis, perpindahan antar-Reel, dan pengulangan menggunakan peristiwa dari pemutar Facebook. Pengaturan privasi Facebook, kebijakan peramban, atau sematan yang diblokir dapat menghambat fitur ini.</p></div></div>
