@@ -2,16 +2,27 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, AudioLines, BarChart3,
-  Bell, BookOpen, Check, ChevronDown, CircleHelp, Clock3, Command, ExternalLink,
-  Film, FolderPlus, Gauge, LayoutGrid, ListMusic, Menu, MoreHorizontal, Pause, Play,
-  Plus, Search, Settings2, ShieldAlert, SkipBack, SkipForward, SlidersHorizontal,
-  Sparkles, Trash2, Video, X,
+  Activity, ArrowRight, AudioLines, Bell, Check, CircleHelp, Clock3, ExternalLink,
+  Film, FolderPlus, Gauge, LayoutGrid, ListMusic, LogOut, Menu, Play, Plus, Search,
+  Settings2, SkipBack, SkipForward, Trash2, Video, X,
 } from 'lucide-react'
 import { FacebookVideoEmbed } from './facebook-video-embed'
-import { useDashboardSession, type PlaybackPreferences, type PlaylistItem, type VideoItem } from './dashboard-session'
+import { useDashboardSession } from './dashboard-session'
+import type { PlaybackActivity, PlaybackPreferences, PlaylistItem, VideoItem } from '@/lib/dashboard-types'
+import {
+  createPlaylistAction,
+  createVideoAction,
+  deletePlaylistAction,
+  deleteVideoAction,
+  finishPlaybackAction,
+  savePreferencesAction,
+  startPlaybackAction,
+  stopPlaybackAction,
+  togglePlaylistVideoAction,
+} from '@/app/dashboard/actions'
+import { logoutAction } from '@/app/login/actions'
 
 const navGroups = [
   { label: 'Ruang kerja', links: [{ label: 'Ringkasan', href: '/dashboard', icon: Gauge }, { label: 'Pemutar', href: '/dashboard/player', icon: Play }] },
@@ -21,6 +32,16 @@ const navGroups = [
 ]
 const pageNames: Record<string, string> = { dashboard: 'Ringkasan', videos: 'Video', playlists: 'Daftar putar', player: 'Pemutar', history: 'Riwayat pemutaran', settings: 'Pengaturan' }
 const concurrentPlaybackOptions = Array.from({ length: 19 }, (_, index) => index + 2)
+const activityLabels: Record<string, string> = {
+  SESSION_STARTED: 'Sesi dimulai',
+  VIDEO_LOADED: 'Video dimuat',
+  STARTED_PLAYING: 'Pemutaran dimulai',
+  PAUSED: 'Pemutaran dijeda',
+  FINISHED_PLAYING: 'Video selesai',
+  NEXT_VIDEO_LOADED: 'Video berikutnya dimuat',
+  SESSION_STOPPED: 'Sesi dihentikan',
+  ERROR: 'Terjadi kesalahan',
+}
 
 function cx(...names: Array<string | false | undefined>) { return names.filter(Boolean).join(' ') }
 function Button({ children, onClick, href, variant = 'secondary', disabled = false, className = '' }: { children: React.ReactNode; onClick?: () => void; href?: string; variant?: 'primary' | 'secondary' | 'quiet' | 'danger'; disabled?: boolean; className?: string }) {
@@ -45,10 +66,28 @@ export function VideoDashboard() {
   const section = pathname.split('/')[2] || 'dashboard'
   const title = pageNames[section] ?? 'Ringkasan'
   const [mobileNav, setMobileNav] = useState(false)
-  const { videos, setVideos, playlists, setPlaylists, selectedPlaylist, setSelectedPlaylist, preferences, setPreferences } = useDashboardSession()
+  const {
+    videos,
+    setVideos,
+    playlists,
+    setPlaylists,
+    selectedPlaylist,
+    setSelectedPlaylist,
+    preferences,
+    setPreferences,
+    admin,
+    activities,
+    setActivities,
+    completedPlaybackCount,
+    setCompletedPlaybackCount,
+    activeSessionCount,
+    setActiveSessionCount,
+    appSettings,
+  } = useDashboardSession()
+  const playbackSessionId = useRef<string | null>(null)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [multiView, setMultiView] = useState(false)
-  const [multiVideoIds, setMultiVideoIds] = useState<number[] | null>(null)
+  const [multiVideoIds, setMultiVideoIds] = useState<string[] | null>(null)
   const [dialog, setDialog] = useState<'video' | 'playlist' | null>(null)
   const [search, setSearch] = useState('')
   const [notice, setNotice] = useState('')
@@ -61,76 +100,251 @@ export function VideoDashboard() {
   }, [multiVideoIds, playlistVideos, preferences.maxConcurrent])
   const visibleVideos = videos.filter((item) => `${item.title} ${item.url}`.toLowerCase().includes(search.toLowerCase()))
   const [formError, setFormError] = useState('')
+  const [errorNotice, setErrorNotice] = useState('')
 
-  function addVideo(form: FormData) {
+  async function addVideo(form: FormData) {
     const url = String(form.get('url') ?? '').trim()
     const titleValue = String(form.get('title') ?? '').trim()
     try {
-      const parsed = new URL(url)
-      if (!['facebook.com', 'www.facebook.com', 'm.facebook.com', 'fb.watch'].includes(parsed.hostname.toLowerCase())) throw new Error()
-    } catch { setFormError('Masukkan URL Facebook atau fb.watch yang valid.'); return }
-    if (videos.some((item) => item.url === url)) { setFormError('URL tersebut sudah ada di pustaka pratinjau ini.'); return }
-    const item = { id: Date.now(), title: titleValue || 'Video Facebook tanpa judul', url, status: 'Perlu diperiksa' as const, added: new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date()) }
-    setVideos((items) => [item, ...items])
-    setFormError('')
-    setDialog(null)
-    setNotice('Video ditambahkan ke pratinjau sesi ini.')
+      const result = await createVideoAction({ url, title: titleValue })
+      if (!result.success) { setFormError(result.message); return }
+      setVideos((items) => [result.data, ...items])
+      setFormError('')
+      setDialog(null)
+      setNotice('Video berhasil disimpan.')
+      setErrorNotice('')
+    } catch {
+      setFormError('Video tidak dapat disimpan. Periksa koneksi database lalu coba lagi.')
+    }
   }
-  function addPlaylist(form: FormData) {
+  async function addPlaylist(form: FormData) {
     const name = String(form.get('name') ?? '').trim()
     if (!name) { setFormError('Masukkan nama daftar putar.'); return }
-    const item = { id: Date.now(), name, description: String(form.get('description') ?? '').trim(), videoIds: [] }
-    setPlaylists((items) => [...items, item]); setSelectedPlaylist(item.id); setFormError(''); setDialog(null); setNotice('Daftar putar ditambahkan ke pratinjau sesi ini.')
+    try {
+      const result = await createPlaylistAction({ name, description: String(form.get('description') ?? '').trim() })
+      if (!result.success) { setFormError(result.message); return }
+      setPlaylists((items) => [...items, result.data])
+      setSelectedPlaylist(result.data.id)
+      setFormError('')
+      setDialog(null)
+      setNotice('Daftar putar berhasil disimpan.')
+      setErrorNotice('')
+    } catch {
+      setFormError('Daftar putar tidak dapat disimpan. Periksa koneksi database lalu coba lagi.')
+    }
   }
-  function removeVideo(id: number) { setVideos((items) => items.filter((item) => item.id !== id)); setPlaylists((items) => items.map((list) => ({ ...list, videoIds: list.videoIds.filter((videoId) => videoId !== id) }))) }
-  function togglePlaylistVideo(videoId: number) { setPlaylists((items) => items.map((item) => item.id === selectedPlaylist ? { ...item, videoIds: item.videoIds.includes(videoId) ? item.videoIds.filter((id) => id !== videoId) : [...item.videoIds, videoId] } : item)) }
+  async function removeVideo(id: string) {
+    try {
+      const result = await deleteVideoAction(id)
+      if (!result.success) { setErrorNotice(result.message); return }
+      setVideos((items) => items.filter((item) => item.id !== id))
+      setPlaylists((items) => items.map((list) => ({ ...list, videoIds: list.videoIds.filter((videoId) => videoId !== id) })))
+      setNotice('Video berhasil dihapus.')
+      setErrorNotice('')
+    } catch {
+      setErrorNotice('Video tidak dapat dihapus. Coba lagi.')
+    }
+  }
+  async function togglePlaylistVideo(videoId: string) {
+    if (!selectedPlaylist) {
+      setErrorNotice('Buat daftar putar terlebih dahulu sebelum menambahkan video.')
+      return
+    }
+    try {
+      const result = await togglePlaylistVideoAction(selectedPlaylist, videoId)
+      if (!result.success) { setErrorNotice(result.message); return }
+      setPlaylists((items) => items.map((item) => item.id === selectedPlaylist ? { ...item, videoIds: result.data } : item))
+      setErrorNotice('')
+    } catch {
+      setErrorNotice('Perubahan daftar putar tidak dapat disimpan. Coba lagi.')
+    }
+  }
+  async function removePlaylist(id: string) {
+    try {
+      const result = await deletePlaylistAction(id)
+      if (!result.success) { setErrorNotice(result.message); return }
+      const remaining = playlists.filter((item) => item.id !== id)
+      setPlaylists(remaining)
+      if (selectedPlaylist === id) setSelectedPlaylist(remaining[0]?.id ?? '')
+      setNotice('Daftar putar berhasil dihapus.')
+      setErrorNotice('')
+    } catch {
+      setErrorNotice('Daftar putar tidak dapat dihapus. Coba lagi.')
+    }
+  }
+  async function updatePreferences(value: PlaybackPreferences) {
+    const previous = preferences
+    setPreferences(value)
+    try {
+      const result = await savePreferencesAction(value)
+      if (!result.success) {
+        setPreferences(previous)
+        setErrorNotice(result.message)
+        return
+      }
+      setNotice('Preferensi berhasil disimpan.')
+      setErrorNotice('')
+    } catch {
+      setPreferences(previous)
+      setErrorNotice('Preferensi tidak dapat disimpan. Coba lagi.')
+    }
+  }
+  async function onVideoReady(playlistId: string, videoId: string) {
+    try {
+      const result = await startPlaybackAction(playlistId, videoId, playbackSessionId.current)
+      if (!result.success) { setErrorNotice(result.message); return }
+      playbackSessionId.current = result.data.sessionId
+      setActivities((items) => [...result.data.activities, ...items].slice(0, 30))
+      if (result.data.activeDelta) setActiveSessionCount((count) => Math.max(0, count + result.data.activeDelta))
+      setErrorNotice('')
+    } catch {
+      setErrorNotice('Sesi pemutaran tidak dapat disimpan.')
+    }
+  }
+  async function onVideoFinished(videoId: string) {
+    const sessionId = playbackSessionId.current
+    if (!sessionId) return
+    try {
+      const result = await finishPlaybackAction(sessionId, videoId)
+      if (!result.success) { setErrorNotice(result.message); return }
+      const activity = result.data
+      if (activity) {
+        setActivities((items) => [activity, ...items].slice(0, 30))
+        setCompletedPlaybackCount((count) => count + 1)
+      }
+    } catch {
+      setErrorNotice('Event selesai tidak dapat disimpan.')
+    }
+  }
+  useEffect(() => {
+    if (section === 'player' && !multiView) return
+    const sessionId = playbackSessionId.current
+    if (!sessionId) return
+    playbackSessionId.current = null
+    void stopPlaybackAction(sessionId).then((result) => {
+      if (!result.success) { setErrorNotice(result.message); return }
+      const activity = result.data
+      if (activity) {
+        setActivities((items) => [activity, ...items].slice(0, 30))
+        setActiveSessionCount((count) => Math.max(0, count - 1))
+      }
+    }).catch(() => setErrorNotice('Sesi pemutaran tidak dapat dihentikan.'))
+  }, [section, multiView, setActivities, setActiveSessionCount])
   const side = <aside className={cx('fixed inset-y-0 left-0 z-30 flex w-[248px] flex-col border-r border-zinc-200/80 bg-white px-3 transition-transform lg:static lg:translate-x-0', mobileNav ? 'translate-x-0' : '-translate-x-full')}>
     <div className="flex h-[62px] items-center gap-3 px-2"><div className="flex size-8 items-center justify-center rounded-[10px] bg-blue-600 text-white"><Play className="size-4 fill-current" /></div><span className="text-[14px] font-semibold tracking-[-.02em] text-zinc-900">Pemutar Video Facebook</span><button className="ml-auto rounded-md p-1 text-zinc-400 hover:bg-zinc-100 lg:hidden" onClick={() => setMobileNav(false)} aria-label="Tutup navigasi"><X className="size-4" /></button></div>
-    <button className="mt-3 flex items-center gap-2 rounded-lg border border-zinc-200 px-2.5 py-2 text-left hover:bg-zinc-50"><div className="flex size-7 items-center justify-center rounded-md bg-zinc-100 text-zinc-600"><Video className="size-3.5" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-700">Pustaka pribadi</p><p className="text-[10px] text-zinc-400">Ruang kerja pratinjau</p></div><ChevronDown className="size-3.5 text-zinc-400" /></button>
+    <div className="mt-3 flex items-center gap-2 rounded-lg border border-zinc-200 px-2.5 py-2"><div className="flex size-7 items-center justify-center rounded-md bg-zinc-100 text-zinc-600"><Video className="size-3.5" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-700">Pustaka administrator</p><p className="text-[10px] text-zinc-400">PostgreSQL</p></div></div>
     <nav className="mt-7 flex-1 space-y-6" aria-label="Navigasi utama">{navGroups.map((group) => <div key={group.label}><p className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-[.12em] text-zinc-400">{group.label}</p><div className="space-y-0.5">{group.links.map((item) => { const active = item.href === '/dashboard' ? section === 'dashboard' : pathname === item.href || (item.href !== '/dashboard/player' && pathname.startsWith(`${item.href}/`)); const Icon = item.icon; return <Link key={item.href} onClick={() => setMobileNav(false)} href={item.href} className={cx('flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] transition-colors', active ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900')}><Icon className="size-[16px]" strokeWidth={1.8} />{item.label}{item.label === 'Video' && <span className="ml-auto text-[11px] text-zinc-400">{videos.length}</span>}</Link> })}</div></div>)}</nav>
-    <div className="mb-3 rounded-lg border border-zinc-200 bg-zinc-50/80 p-3"><div className="flex items-center gap-2"><ShieldAlert className="size-4 text-amber-600" /><p className="text-xs font-medium text-zinc-700">Mode pratinjau</p></div><p className="mt-1.5 text-[11px] leading-4 text-zinc-500">Perubahan hanya berlaku sementara dan terlihat di sesi peramban ini.</p></div>
-    <button className="mb-3 flex items-center gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-zinc-50"><div className="flex size-8 items-center justify-center rounded-full bg-zinc-200 text-xs font-semibold text-zinc-600">AD</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-700">Administrator pratinjau</p><p className="text-[10px] text-zinc-400">Belum masuk</p></div><MoreHorizontal className="size-4 text-zinc-400" /></button>
+    <div className="mb-3 flex items-center gap-2.5 rounded-lg px-2 py-2"><div className="flex size-8 items-center justify-center rounded-full bg-zinc-200 text-xs font-semibold text-zinc-600">AD</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-700">{admin.name}</p><p className="truncate text-[10px] text-zinc-400">{admin.email}</p></div><form action={logoutAction}><button type="submit" className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-100" aria-label="Keluar"><LogOut className="size-4" /></button></form></div>
   </aside>
 
-  function header() { return <header className="sticky top-0 z-20 flex h-[62px] items-center justify-between border-b border-zinc-200/80 bg-[#fafafa]/90 px-4 backdrop-blur-md sm:px-7"><div className="flex items-center gap-3"><button className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-100 lg:hidden" onClick={() => setMobileNav(true)} aria-label="Buka navigasi"><Menu className="size-[18px]" /></button><div className="hidden items-center gap-2 text-xs text-zinc-400 sm:flex"><span>Ruang kerja</span><span>/</span><span className="font-medium text-zinc-700">{title}</span></div><span className="text-sm font-medium text-zinc-700 sm:hidden">{title}</span></div><div className="flex items-center gap-2"><Button variant="quiet" className="hidden sm:inline-flex"><CircleHelp className="size-4" />Bantuan</Button><button className="relative rounded-lg p-2 text-zinc-500 hover:bg-zinc-100" aria-label="Notifikasi"><Bell className="size-4" /></button><div className="mx-1 h-5 w-px bg-zinc-200" /><button className="flex size-7 items-center justify-center rounded-full bg-zinc-200 text-[10px] font-semibold text-zinc-600" aria-label="Profil administrator pratinjau">AD</button></div></header> }
+  function header() { return <header className="sticky top-0 z-20 flex h-[62px] items-center justify-between border-b border-zinc-200/80 bg-[#fafafa]/90 px-4 backdrop-blur-md sm:px-7"><div className="flex items-center gap-3"><button className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-100 lg:hidden" onClick={() => setMobileNav(true)} aria-label="Buka navigasi"><Menu className="size-[18px]" /></button><div className="hidden items-center gap-2 text-xs text-zinc-400 sm:flex"><span>Ruang kerja</span><span>/</span><span className="font-medium text-zinc-700">{title}</span></div><span className="text-sm font-medium text-zinc-700 sm:hidden">{title}</span></div><div className="flex items-center gap-2"><Button variant="quiet" className="hidden sm:inline-flex"><CircleHelp className="size-4" />Bantuan</Button><button className="relative rounded-lg p-2 text-zinc-500 hover:bg-zinc-100" aria-label="Notifikasi"><Bell className="size-4" /></button><div className="mx-1 h-5 w-px bg-zinc-200" /><span className="flex size-7 items-center justify-center rounded-full bg-zinc-200 text-[10px] font-semibold text-zinc-600" aria-label={`Administrator ${admin.name}`}>AD</span></div></header> }
 
   return <div className="min-h-screen bg-[#fafafa] text-zinc-900"><div className="flex min-h-screen">{side}{mobileNav && <button aria-label="Tutup latar navigasi" className="fixed inset-0 z-20 bg-zinc-950/20 lg:hidden" onClick={() => setMobileNav(false)} />}
     <div className="min-w-0 flex-1">{header()}<main className="mx-auto max-w-[1440px] px-4 py-6 sm:px-7 sm:py-8">
-      <div className="mb-6 flex items-start gap-3 rounded-xl border border-amber-200/80 bg-amber-50/70 px-4 py-3"><div className="mt-0.5 text-amber-700"><ShieldAlert className="size-4" /></div><div className="min-w-0 flex-1"><p className="text-xs font-semibold text-amber-900">Pratinjau antarmuka — belum terhubung ke basis data</p><p className="mt-0.5 text-[11px] leading-5 text-amber-800/80">Data contoh hanya ilustrasi. Perubahan bersifat sementara; autentikasi, penyimpanan permanen, dan pencatatan aktivitas pemutaran belum tersedia.</p></div><span className="hidden shrink-0 rounded-md bg-white/70 px-2 py-1 text-[10px] font-medium text-amber-800 ring-1 ring-amber-200 sm:block">SESI LOKAL</span></div>
+      <div className="mb-6 flex items-start gap-3 rounded-xl border border-emerald-200/80 bg-emerald-50/70 px-4 py-3"><div className="mt-0.5 text-emerald-700"><Check className="size-4" /></div><div className="min-w-0 flex-1"><p className="text-xs font-semibold text-emerald-900">Data tersimpan di PostgreSQL</p><p className="mt-0.5 text-[11px] leading-5 text-emerald-800/80">Perubahan video, daftar putar, dan preferensi disimpan pada basis data.</p></div><span className="hidden shrink-0 rounded-md bg-white/70 px-2 py-1 text-[10px] font-medium text-emerald-800 ring-1 ring-emerald-200 sm:block">TERHUBUNG</span></div>
+      {errorNotice && <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{errorNotice}</div>}
       {notice && <div role="status" className="mb-4 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800"><span className="flex items-center gap-2"><Check className="size-4" />{notice}</span><button onClick={() => setNotice('')} aria-label="Tutup notifikasi"><X className="size-4" /></button></div>}
-      {section === 'videos' ? <VideosPage videos={visibleVideos} search={search} setSearch={setSearch} onAdd={() => { setFormError(''); setDialog('video') }} onRemove={removeVideo} onAddToPlaylist={togglePlaylistVideo} playlists={playlists} /> : null}
-      {section === 'playlists' ? <PlaylistsPage playlists={playlists} videos={videos} selected={selectedPlaylist} onSelect={setSelectedPlaylist} onCreate={() => { setFormError(''); setDialog('playlist') }} onToggleVideo={togglePlaylistVideo} onDelete={(id) => setPlaylists((items) => items.filter((item) => item.id !== id))} /> : null}
-      {section === 'player' ? <PlayerPage playlists={playlists} activePlaylist={activePlaylist} playlistVideos={playlistVideos} currentVideo={currentVideo} currentIndex={currentIndex} onSelectPlaylist={(id) => { setSelectedPlaylist(id); setCurrentIndex(0); setMultiVideoIds(null) }} onSelectVideo={setCurrentIndex} onNext={() => setCurrentIndex((i) => Math.min(i + 1, playlistVideos.length - 1))} onPrevious={() => setCurrentIndex((i) => Math.max(0, i - 1))} preferences={preferences} setPreferences={setPreferences} multiView={multiView} setMultiView={setMultiView} selectedMultiVideos={selectedMultiVideos} onToggleMultiVideo={(id) => setMultiVideoIds((multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).includes(id) ? (multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).filter((videoId) => videoId !== id) : [...(multiVideoIds ?? selectedMultiVideos.map((video) => video.id)), id])} /> : null}
-      {section === 'history' ? <HistoryPage /> : null}
-      {section === 'settings' ? <SettingsPage preferences={preferences} setPreferences={setPreferences} /> : null}
-      {section === 'dashboard' || !pageNames[section] ? <OverviewPage videos={videos} playlists={playlists} activePlaylist={activePlaylist} onAddVideo={() => { setFormError(''); setDialog('video') }} /> : null}
+      {section === 'videos' ? <VideosPage videos={visibleVideos} search={search} setSearch={setSearch} onAdd={() => { setFormError(''); setDialog('video') }} onRemove={removeVideo} onAddToPlaylist={togglePlaylistVideo} /> : null}
+      {section === 'playlists' ? <PlaylistsPage playlists={playlists} videos={videos} selected={selectedPlaylist} onSelect={setSelectedPlaylist} onCreate={() => { setFormError(''); setDialog('playlist') }} onToggleVideo={togglePlaylistVideo} onDelete={removePlaylist} /> : null}
+      {section === 'player' ? <PlayerPage playlists={playlists} activePlaylist={activePlaylist} playlistVideos={playlistVideos} currentVideo={currentVideo} currentIndex={currentIndex} onSelectPlaylist={(id) => { setSelectedPlaylist(id); setCurrentIndex(0); setMultiVideoIds(null) }} onSelectVideo={setCurrentIndex} onNext={() => setCurrentIndex((i) => Math.min(i + 1, playlistVideos.length - 1))} onPrevious={() => setCurrentIndex((i) => Math.max(0, i - 1))} preferences={preferences} setPreferences={updatePreferences} multiView={multiView} setMultiView={setMultiView} selectedMultiVideos={selectedMultiVideos} onVideoReady={(videoId) => { if (activePlaylist) void onVideoReady(activePlaylist.id, videoId) }} onVideoFinished={(videoId) => { void onVideoFinished(videoId) }} onToggleMultiVideo={(id) => setMultiVideoIds((multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).includes(id) ? (multiVideoIds ?? selectedMultiVideos.map((video) => video.id)).filter((videoId) => videoId !== id) : [...(multiVideoIds ?? selectedMultiVideos.map((video) => video.id)), id])} /> : null}
+      {section === 'history' ? <HistoryPage activities={activities} /> : null}
+      {section === 'settings' ? <SettingsPage preferences={preferences} setPreferences={updatePreferences} admin={admin} appSettings={appSettings} /> : null}
+      {section === 'dashboard' || !pageNames[section] ? <OverviewPage videos={videos} playlists={playlists} activePlaylist={activePlaylist} activities={activities} completedPlaybackCount={completedPlaybackCount} activeSessionCount={activeSessionCount} onAddVideo={() => { setFormError(''); setDialog('video') }} /> : null}
     </main></div></div>
     {dialog && <Dialog title={dialog === 'video' ? 'Tambah video' : 'Buat daftar putar'} onClose={() => setDialog(null)} onSubmit={dialog === 'video' ? addVideo : addPlaylist} error={formError} kind={dialog} />}
   </div>
 }
 
-function OverviewPage({ videos, playlists, activePlaylist, onAddVideo }: { videos: VideoItem[]; playlists: PlaylistItem[]; activePlaylist?: PlaylistItem; onAddVideo: () => void }) {
-  return <><SectionHeading eyebrow="Senin, 16 November 2026" title="Selamat pagi, Admin" description="Pantau pustaka video dan ruang pemutaran Anda." action={<Button variant="primary" onClick={onAddVideo}><Plus className="size-4" />Tambah video</Button>} />
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[{ label: 'Video di pustaka', value: videos.length.toString(), meta: 'Data pratinjau', icon: Film }, { label: 'Daftar putar', value: playlists.length.toString(), meta: 'Dalam sesi ini', icon: ListMusic }, { label: 'Aktivitas pemutaran', value: '—', meta: 'Tidak dicatat', icon: Activity }, { label: 'Status pemutar', value: 'Tidak aktif', meta: 'Tidak ada sesi aktif', icon: AudioLines }].map(({ label, value, meta, icon: Icon }) => <Panel key={label} className="p-4"><div className="flex items-center justify-between"><span className="text-xs font-medium text-zinc-500">{label}</span><Icon className="size-4 text-zinc-400" /></div><div className="mt-4 flex items-end justify-between"><span className="text-[27px] font-semibold tracking-[-.05em] text-zinc-900">{value}</span><span className="mb-1 text-[10px] text-zinc-400">{meta}</span></div></Panel>)}</div>
-    <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_1fr]"><Panel><PanelTitle note="Aktivitas pemutaran akan tampil di sini setelah pencatatan diaktifkan." action={<Button href="/dashboard/history" variant="quiet">Riwayat <ArrowRight className="size-3.5" /></Button>}>Aktivitas terbaru</PanelTitle><div className="flex min-h-[280px] flex-col items-center justify-center px-5 text-center"><div className="mb-3 flex size-10 items-center justify-center rounded-full bg-zinc-100"><Activity className="size-4 text-zinc-500" /></div><p className="text-sm font-medium text-zinc-700">Belum ada aktivitas pemutaran yang tercatat</p><p className="mt-1 max-w-xs text-xs leading-5 text-zinc-500">Pratinjau ini tidak mengumpulkan atau melaporkan jumlah tayangan Facebook. Hubungkan layanan sisi server untuk menyimpan aktivitas yang terpantau aplikasi.</p></div></Panel>
-      <Panel><PanelTitle note="Daftar contoh · bukan sesi pemutaran aktif" action={<Button href="/dashboard/playlists" variant="quiet">Semua daftar putar <ArrowRight className="size-3.5" /></Button>}>Daftar putar</PanelTitle><div className="divide-y divide-zinc-100">{playlists.slice(0, 3).map((list, i) => <Link href="/dashboard/playlists" key={list.id} className="flex items-center gap-3 px-5 py-4 hover:bg-zinc-50/70"><div className={cx('flex size-9 items-center justify-center rounded-lg', i === 0 ? 'bg-blue-50 text-blue-600' : 'bg-zinc-100 text-zinc-500')}><ListMusic className="size-4" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{list.name}</p><p className="mt-1 text-[11px] text-zinc-400">{list.videoIds.length} video · Pratinjau</p></div><ArrowRight className="size-4 text-zinc-300" /></Link>)}</div></Panel></div>
-    <div className="mt-5 grid gap-5 xl:grid-cols-[1fr_1.55fr]"><Panel><PanelTitle>Tindakan cepat</PanelTitle><div className="grid gap-2 p-4 sm:grid-cols-2 xl:grid-cols-1">{[{ href: '/dashboard/videos', icon: Plus, title: 'Tambahkan ke pustaka', note: 'Simpan URL video Facebook' }, { href: '/dashboard/playlists', icon: FolderPlus, title: 'Buat daftar putar', note: 'Susun video tersimpan' }, { href: '/dashboard/player', icon: Play, title: 'Buka pemutar', note: 'Pratinjau video sematan' }, { href: '/dashboard/history', icon: Clock3, title: 'Lihat riwayat', note: 'Aktivitas aplikasi saja' }].map((item) => <Link href={item.href} key={item.title} className="flex items-center gap-3 rounded-lg border border-zinc-100 p-3 hover:border-zinc-200 hover:bg-zinc-50"><item.icon className="size-4 text-zinc-500" /><span className="min-w-0 flex-1"><span className="block text-xs font-medium text-zinc-700">{item.title}</span><span className="mt-0.5 block text-[10px] text-zinc-400">{item.note}</span></span><ArrowRight className="size-3.5 text-zinc-300" /></Link>)}</div></Panel><Panel><PanelTitle note="Data contoh · ketersediaan sematan ditentukan oleh penerbit." action={<Button href="/dashboard/videos" variant="quiet">Lihat pustaka <ArrowRight className="size-3.5" /></Button>}>Video yang baru ditambahkan</PanelTitle><div className="divide-y divide-zinc-100">{videos.slice(0, 3).map((video) => <div key={video.id} className="flex items-center gap-3 px-5 py-3.5"><div className="flex size-9 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500"><Film className="size-4" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{video.title}</p><p className="mt-1 truncate text-[10px] text-zinc-400">{video.added}</p></div><Status>{video.status}</Status></div>)}</div></Panel></div>
+function OverviewPage({ videos, playlists, activePlaylist, activities, completedPlaybackCount, activeSessionCount, onAddVideo }: {
+  videos: VideoItem[]
+  playlists: PlaylistItem[]
+  activePlaylist?: PlaylistItem
+  activities: PlaybackActivity[]
+  completedPlaybackCount: number
+  activeSessionCount: number
+  onAddVideo: () => void
+}) {
+  return <>
+    <SectionHeading eyebrow="Ringkasan" title="Selamat datang, Admin" description="Data berikut diambil dari basis data aplikasi." action={<Button variant="primary" onClick={onAddVideo}><Plus className="size-4" />Tambah video</Button>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {[
+        { label: 'Video di pustaka', value: videos.length.toString(), meta: 'Tersimpan', icon: Film },
+        { label: 'Daftar putar', value: playlists.length.toString(), meta: 'Tersimpan', icon: ListMusic },
+        { label: 'Video selesai', value: completedPlaybackCount.toString(), meta: 'Event aplikasi', icon: Activity },
+        { label: 'Sesi pemutar aktif', value: activeSessionCount.toString(), meta: 'Saat ini', icon: AudioLines },
+      ].map(({ label, value, meta, icon: Icon }) => <Panel key={label} className="p-4"><div className="flex items-center justify-between"><span className="text-xs font-medium text-zinc-500">{label}</span><Icon className="size-4 text-zinc-400" /></div><div className="mt-4 flex items-end justify-between"><span className="text-[27px] font-semibold tracking-[-.05em] text-zinc-900">{value}</span><span className="mb-1 text-[10px] text-zinc-400">{meta}</span></div></Panel>)}
+    </div>
+    <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_1fr]">
+      <Panel>
+        <PanelTitle note="Event yang diamati oleh pemutar aplikasi, bukan statistik Facebook." action={<Button href="/dashboard/history" variant="quiet">Riwayat <ArrowRight className="size-3.5" /></Button>}>Aktivitas terbaru</PanelTitle>
+        {activePlaylist && <p className="border-b border-zinc-100 px-5 py-3 text-xs text-zinc-500">Daftar putar terakhir dipilih: {activePlaylist.name}</p>}
+        {activities.length ? <div className="divide-y divide-zinc-100">{activities.slice(0, 4).map((activity) => <div key={activity.id} className="flex items-center gap-3 px-5 py-3"><Activity className="size-4 text-zinc-400" /><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-700">{activityLabels[activity.eventType] ?? activity.eventType} · {activity.videoTitle}</p><p className="mt-1 truncate text-[10px] text-zinc-400">{activity.playlistName}</p></div></div>)}</div> : <p className="px-5 py-4 text-sm text-zinc-600">Belum ada event pemutaran yang teramati.</p>}
+      </Panel>
+      <Panel>
+        <PanelTitle note="Daftar putar yang tersimpan." action={<Button href="/dashboard/playlists" variant="quiet">Semua daftar putar <ArrowRight className="size-3.5" /></Button>}>Daftar putar</PanelTitle>
+        <div className="divide-y divide-zinc-100">
+          {playlists.slice(0, 3).map((list, index) => <Link href="/dashboard/playlists" key={list.id} className="flex items-center gap-3 px-5 py-4 hover:bg-zinc-50/70"><div className={cx('flex size-9 items-center justify-center rounded-lg', index === 0 ? 'bg-blue-50 text-blue-600' : 'bg-zinc-100 text-zinc-500')}><ListMusic className="size-4" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{list.name}</p><p className="mt-1 text-[11px] text-zinc-400">{list.videoIds.length} video · PostgreSQL</p></div><ArrowRight className="size-4 text-zinc-300" /></Link>)}
+          {!playlists.length && <EmptyState title="Belum ada daftar putar" description="Buat daftar putar untuk mengelompokkan video tersimpan." />}
+        </div>
+      </Panel>
+    </div>
+    <div className="mt-5 grid gap-5 xl:grid-cols-[1fr_1.55fr]">
+      <Panel><PanelTitle>Tindakan cepat</PanelTitle><div className="grid gap-2 p-4 sm:grid-cols-2 xl:grid-cols-1">{[{ href: '/dashboard/videos', icon: Plus, title: 'Tambahkan ke pustaka', note: 'Simpan URL Facebook' }, { href: '/dashboard/playlists', icon: FolderPlus, title: 'Buat daftar putar', note: 'Susun video tersimpan' }, { href: '/dashboard/player', icon: Play, title: 'Buka pemutar', note: 'Putar video yang diizinkan' }, { href: '/dashboard/history', icon: Clock3, title: 'Lihat riwayat', note: 'Event aplikasi saja' }].map((item) => <Link href={item.href} key={item.title} className="flex items-center gap-3 rounded-lg border border-zinc-100 p-3 hover:border-zinc-200 hover:bg-zinc-50"><item.icon className="size-4 text-zinc-500" /><span className="min-w-0 flex-1"><span className="block text-xs font-medium text-zinc-700">{item.title}</span><span className="mt-0.5 block text-[10px] text-zinc-400">{item.note}</span></span><ArrowRight className="size-3.5 text-zinc-300" /></Link>)}</div></Panel>
+      <Panel><PanelTitle note="Ketersediaan sematan ditentukan oleh penerbit." action={<Button href="/dashboard/videos" variant="quiet">Lihat pustaka <ArrowRight className="size-3.5" /></Button>}>Video terbaru</PanelTitle><div className="divide-y divide-zinc-100">{videos.slice(0, 3).map((video) => <div key={video.id} className="flex items-center gap-3 px-5 py-3.5"><div className="flex size-9 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500"><Film className="size-4" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{video.title}</p><p className="mt-1 truncate text-[10px] text-zinc-400">{video.added}</p></div><Status>{video.status}</Status></div>)}{!videos.length && <EmptyState title="Belum ada video" description="Tambahkan URL video Facebook yang dapat Anda akses." />}</div></Panel>
+    </div>
   </>
 }
 
-function VideosPage({ videos, search, setSearch, onAdd, onRemove, onAddToPlaylist, playlists }: { videos: VideoItem[]; search: string; setSearch: (value: string) => void; onAdd: () => void; onRemove: (id: number) => void; onAddToPlaylist: (id: number) => void; playlists: PlaylistItem[] }) {
-  return <><SectionHeading eyebrow="Pustaka" title="Video" description="Kelola tautan video Facebook yang Anda berhak sematkan." action={<Button variant="primary" onClick={onAdd}><Plus className="size-4" />Tambah video</Button>} />
-    <Panel><div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4"><div><p className="text-[13px] font-semibold text-zinc-800">Pustaka video <span className="ml-1 rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">{videos.length}</span></p><p className="mt-1 text-[11px] text-zinc-400">Daftar contoh · perubahan hanya berlaku selama sesi ini.</p></div><div className="flex items-center gap-2"><label className="flex h-9 w-[210px] items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3"><Search className="size-3.5 text-zinc-400" /><input aria-label="Cari video" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari video" className="w-full bg-transparent text-xs outline-none placeholder:text-zinc-400" /></label><Button variant="secondary"><SlidersHorizontal className="size-3.5" /><span className="hidden sm:inline">Saring</span></Button></div></div>
-      <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left"><thead className="bg-zinc-50/70 text-[10px] font-medium uppercase tracking-[.08em] text-zinc-400"><tr><th className="px-5 py-3">Video</th><th className="px-4 py-3">URL Facebook</th><th className="px-4 py-3">Status sematan</th><th className="px-4 py-3">Ditambahkan</th><th className="px-4 py-3 text-right">Tindakan</th></tr></thead><tbody className="divide-y divide-zinc-100">{videos.map((video) => <tr key={video.id} className="group hover:bg-zinc-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500"><Film className="size-4" /></div><span className="max-w-[200px] truncate text-xs font-medium text-zinc-700">{video.title}</span></div></td><td className="max-w-[220px] truncate px-4 py-3.5 text-[11px] text-zinc-500">{video.url}</td><td className="px-4 py-3.5"><Status>{video.status}</Status></td><td className="px-4 py-3.5 text-[11px] text-zinc-500">{video.added}</td><td className="px-4 py-3.5"><div className="flex justify-end gap-1"><button onClick={() => onAddToPlaylist(video.id)} title={`Tambahkan atau hapus ${video.title} dari daftar putar terpilih`} aria-label={`Tambahkan atau hapus ${video.title} dari daftar putar terpilih`} className="rounded-md p-2 text-zinc-400 hover:bg-blue-50 hover:text-blue-600"><ListMusic className="size-4" /></button><a href={video.url} target="_blank" rel="noreferrer" title="Buka video asli di Facebook" className="rounded-md p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"><ExternalLink className="size-4" /></a><button onClick={() => onRemove(video.id)} title="Hapus dari pratinjau" aria-label={`Hapus ${video.title}`} className="rounded-md p-2 text-zinc-400 hover:bg-red-50 hover:text-red-600"><Trash2 className="size-4" /></button></div></td></tr>)}</tbody></table>{videos.length === 0 && <EmptyState title="Tidak ada video yang cocok" description="Coba kata kunci lain atau tambahkan URL video Facebook ke pratinjau sesi ini." />}</div>
-      <div className="flex items-center justify-between border-t border-zinc-100 px-5 py-3 text-[11px] text-zinc-400"><span>Menampilkan {videos.length} video contoh</span><span>Halaman berikutnya belum tersedia di pratinjau</span></div>
-    </Panel><p className="mt-3 text-[11px] leading-5 text-zinc-400">Sematan dapat diblokir oleh pemilik video, pembatasan pemirsa, atau pengaturan Facebook. Antarmuka ini tidak memeriksa izin atau ketersediaan terlebih dahulu.</p></>
+function VideosPage({ videos, search, setSearch, onAdd, onRemove, onAddToPlaylist }: {
+  videos: VideoItem[]
+  search: string
+  setSearch: (value: string) => void
+  onAdd: () => void
+  onRemove: (id: string) => void
+  onAddToPlaylist: (id: string) => void
+}) {
+  return <>
+    <SectionHeading eyebrow="Pustaka" title="Video" description="Kelola tautan video Facebook yang Anda berhak sematkan." action={<Button variant="primary" onClick={onAdd}><Plus className="size-4" />Tambah video</Button>} />
+    <Panel>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4">
+        <div><p className="text-[13px] font-semibold text-zinc-800">Pustaka video <span className="ml-1 rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">{videos.length}</span></p><p className="mt-1 text-[11px] text-zinc-400">Data tersimpan di PostgreSQL.</p></div>
+        <label className="flex h-9 w-[210px] items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3"><Search className="size-3.5 text-zinc-400" /><input aria-label="Cari video" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Cari video" className="w-full bg-transparent text-xs outline-none placeholder:text-zinc-400" /></label>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] text-left">
+          <thead className="bg-zinc-50/70 text-[10px] font-medium uppercase tracking-[.08em] text-zinc-400"><tr><th className="px-5 py-3">Video</th><th className="px-4 py-3">URL Facebook</th><th className="px-4 py-3">Status sematan</th><th className="px-4 py-3">Ditambahkan</th><th className="px-4 py-3 text-right">Tindakan</th></tr></thead>
+          <tbody className="divide-y divide-zinc-100">{videos.map((video) => <tr key={video.id} className="group hover:bg-zinc-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500"><Film className="size-4" /></div><span className="max-w-[200px] truncate text-xs font-medium text-zinc-700">{video.title}</span></div></td><td className="max-w-[220px] truncate px-4 py-3.5 text-[11px] text-zinc-500">{video.url}</td><td className="px-4 py-3.5"><Status>{video.status}</Status></td><td className="px-4 py-3.5 text-[11px] text-zinc-500">{video.added}</td><td className="px-4 py-3.5"><div className="flex justify-end gap-1"><button onClick={() => onAddToPlaylist(video.id)} title={`Tambahkan atau hapus ${video.title} dari daftar putar terpilih`} aria-label={`Tambahkan atau hapus ${video.title} dari daftar putar terpilih`} className="rounded-md p-2 text-zinc-400 hover:bg-blue-50 hover:text-blue-600"><ListMusic className="size-4" /></button><a href={video.url} target="_blank" rel="noreferrer" title="Buka video asli di Facebook" className="rounded-md p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"><ExternalLink className="size-4" /></a><button onClick={() => onRemove(video.id)} title="Hapus video" aria-label={`Hapus ${video.title}`} className="rounded-md p-2 text-zinc-400 hover:bg-red-50 hover:text-red-600"><Trash2 className="size-4" /></button></div></td></tr>)}</tbody>
+        </table>
+        {videos.length === 0 && <EmptyState title="Belum ada video" description={search ? 'Tidak ada video yang cocok dengan pencarian.' : 'Tambahkan URL video Facebook yang dapat Anda akses.'} />}
+      </div>
+    </Panel>
+    <p className="mt-3 text-[11px] leading-5 text-zinc-400">Sematan dapat diblokir oleh pemilik video, pembatasan pemirsa, atau pengaturan Facebook.</p>
+  </>
 }
 
-function PlaylistsPage({ playlists, videos, selected, onSelect, onCreate, onToggleVideo, onDelete }: { playlists: PlaylistItem[]; videos: VideoItem[]; selected: number; onSelect: (id: number) => void; onCreate: () => void; onToggleVideo: (id: number) => void; onDelete: (id: number) => void }) {
+function PlaylistsPage({ playlists, videos, selected, onSelect, onCreate, onToggleVideo, onDelete }: {
+  playlists: PlaylistItem[]
+  videos: VideoItem[]
+  selected: string
+  onSelect: (id: string) => void
+  onCreate: () => void
+  onToggleVideo: (id: string) => void
+  onDelete: (id: string) => void
+}) {
   const selectedList = playlists.find((item) => item.id === selected)
-  return <><SectionHeading eyebrow="Pustaka" title="Daftar putar" description="Susun video dalam kumpulan berurutan untuk ditonton secara manual." action={<Button variant="primary" onClick={onCreate}><Plus className="size-4" />Daftar putar baru</Button>} />
-    {playlists.length ? <div className="grid gap-5 xl:grid-cols-[300px_1fr]"><Panel className="h-fit"><PanelTitle note={`${playlists.length} daftar putar contoh`}>Daftar putar Anda</PanelTitle><div className="divide-y divide-zinc-100">{playlists.map((list) => <button onClick={() => onSelect(list.id)} key={list.id} className={cx('flex w-full items-center gap-3 px-4 py-4 text-left transition-colors', selected === list.id ? 'bg-blue-50/70' : 'hover:bg-zinc-50')}><div className={cx('flex size-9 items-center justify-center rounded-lg', selected === list.id ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500')}><ListMusic className="size-4" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{list.name}</p><p className="mt-1 text-[10px] text-zinc-400">{list.videoIds.length} video</p></div><ArrowRight className="size-3.5 text-zinc-300" /></button>)}</div></Panel>
-      {selectedList ? <Panel><div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4"><div><p className="text-sm font-semibold text-zinc-800">{selectedList.name}</p><p className="mt-1 text-xs text-zinc-400">{selectedList.description || 'Tidak ada deskripsi'} · Hanya pratinjau</p></div><div className="flex gap-2"><Button variant="danger" onClick={() => onDelete(selectedList.id)}><Trash2 className="size-3.5" />Hapus</Button><Button href="/dashboard/player" variant="primary"><Play className="size-3.5" />Buka pemutar</Button></div></div><div className="border-b border-zinc-100 bg-zinc-50/70 px-5 py-3"><p className="text-[11px] font-medium text-zinc-600">Tambahkan atau hapus video</p><p className="mt-1 text-[10px] text-zinc-400">Pilih video di bawah untuk menambahkan atau menghapusnya dari daftar putar terpilih.</p></div><div className="divide-y divide-zinc-100">{videos.map((video) => { const included = selectedList.videoIds.includes(video.id); return <button key={video.id} onClick={() => onToggleVideo(video.id)} className="flex w-full items-center gap-3 px-5 py-3.5 text-left hover:bg-zinc-50"><span className={cx('flex size-5 items-center justify-center rounded border', included ? 'border-blue-600 bg-blue-600 text-white' : 'border-zinc-300 bg-white')}>{included && <Check className="size-3.5" />}</span><Film className="size-4 text-zinc-400" /><span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-700">{video.title}</span><Status>{video.status}</Status></button> })}{videos.length === 0 && <EmptyState title="Pustaka Anda kosong" description="Tambahkan video terlebih dahulu untuk memasukkannya ke daftar putar." />}</div><div className="border-t border-zinc-100 px-5 py-3 text-[10px] text-zinc-400">Pengurutan dan penyimpanan urutan memerlukan basis data; pratinjau ini mengikuti urutan pemilihan.</div></Panel> : <Panel><EmptyState title="Pilih daftar putar" description="Pilih daftar dari sisi kiri untuk melihat videonya." /></Panel>}</div> : <Panel><EmptyState title="Buat daftar putar pertama Anda" description="Daftar putar hanya tersedia selama sesi pratinjau ini." /></Panel>}
+  return <>
+    <SectionHeading eyebrow="Pustaka" title="Daftar putar" description="Susun video tersimpan ke dalam daftar putar." action={<Button variant="primary" onClick={onCreate}><Plus className="size-4" />Daftar putar baru</Button>} />
+    {playlists.length ? <div className="grid gap-5 xl:grid-cols-[300px_1fr]">
+      <Panel className="h-fit">
+        <PanelTitle note={`${playlists.length} daftar putar tersimpan`}>Daftar putar Anda</PanelTitle>
+        <div className="divide-y divide-zinc-100">{playlists.map((list) => <button onClick={() => onSelect(list.id)} key={list.id} className={cx('flex w-full items-center gap-3 px-4 py-4 text-left transition-colors', selected === list.id ? 'bg-blue-50/70' : 'hover:bg-zinc-50')}><div className={cx('flex size-9 items-center justify-center rounded-lg', selected === list.id ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500')}><ListMusic className="size-4" /></div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{list.name}</p><p className="mt-1 text-[10px] text-zinc-400">{list.videoIds.length} video</p></div><ArrowRight className="size-3.5 text-zinc-300" /></button>)}</div>
+      </Panel>
+      {selectedList ? <Panel>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4"><div><p className="text-sm font-semibold text-zinc-800">{selectedList.name}</p><p className="mt-1 text-xs text-zinc-400">{selectedList.description || 'Tidak ada deskripsi'} · Tersimpan</p></div><div className="flex gap-2"><Button variant="danger" onClick={() => onDelete(selectedList.id)}><Trash2 className="size-3.5" />Hapus</Button><Button href="/dashboard/player" variant="primary"><Play className="size-3.5" />Buka pemutar</Button></div></div>
+        <div className="border-b border-zinc-100 bg-zinc-50/70 px-5 py-3"><p className="text-[11px] font-medium text-zinc-600">Video dalam daftar putar</p><p className="mt-1 text-[10px] text-zinc-400">Pilih video untuk menambahkan atau menghapusnya. Urutan penambahan tersimpan.</p></div>
+        <div className="divide-y divide-zinc-100">{videos.map((video) => { const included = selectedList.videoIds.includes(video.id); return <button key={video.id} onClick={() => onToggleVideo(video.id)} className="flex w-full items-center gap-3 px-5 py-3.5 text-left hover:bg-zinc-50"><span className={cx('flex size-5 items-center justify-center rounded border', included ? 'border-blue-600 bg-blue-600 text-white' : 'border-zinc-300 bg-white')}>{included && <Check className="size-3.5" />}</span><Film className="size-4 text-zinc-400" /><span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-700">{video.title}</span><Status>{video.status}</Status></button> })}{videos.length === 0 && <EmptyState title="Pustaka Anda kosong" description="Tambahkan video terlebih dahulu untuk memasukkannya ke daftar putar." />}</div>
+      </Panel> : <Panel><EmptyState title="Pilih daftar putar" description="Pilih daftar dari sisi kiri untuk melihat videonya." /></Panel>}
+    </div> : <Panel><EmptyState title="Belum ada daftar putar" description="Buat daftar putar pertama untuk mengelompokkan video tersimpan." /></Panel>}
   </>
 }
 
@@ -140,7 +354,7 @@ type PlayerPageProps = {
   playlistVideos: VideoItem[]
   currentVideo?: VideoItem
   currentIndex: number
-  onSelectPlaylist: (id: number) => void
+  onSelectPlaylist: (id: string) => void
   onSelectVideo: (index: number) => void
   onNext: () => void
   onPrevious: () => void
@@ -149,16 +363,18 @@ type PlayerPageProps = {
   multiView: boolean
   setMultiView: (value: boolean) => void
   selectedMultiVideos: VideoItem[]
-  onToggleMultiVideo: (id: number) => void
+  onVideoReady: (videoId: string) => void
+  onVideoFinished: (videoId: string) => void
+  onToggleMultiVideo: (id: string) => void
 }
 
 function PlayerPage(props: PlayerPageProps) {
   return props.multiView ? <MultiPlayerPage {...props} /> : <SinglePlayerPage {...props} />
 }
 
-function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVideo, currentIndex, onSelectPlaylist, onSelectVideo, onNext, onPrevious, preferences, setPreferences, setMultiView }: PlayerPageProps) {
+function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVideo, currentIndex, onSelectPlaylist, onSelectVideo, onNext, onPrevious, preferences, setPreferences, setMultiView, onVideoReady, onVideoFinished }: PlayerPageProps) {
   const validFacebookUrl = currentVideo && (/^https:\/\/(www\.|m\.)?facebook\.com\//.test(currentVideo.url) || /^https:\/\/fb\.watch\//.test(currentVideo.url)) ? currentVideo.url : null
-  return <><SectionHeading eyebrow="Pemutaran" title="Pemutar" description="Pratinjau sematan Facebook yang diizinkan. Pemutaran dan ketersediaan sematan dikendalikan Facebook." action={<div className="flex items-center gap-2"><Button variant="secondary" onClick={() => setMultiView(true)}><LayoutGrid className="size-3.5" />Tampilan serentak</Button><label className="flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-xs text-zinc-500"><ListMusic className="size-4" /><span className="sr-only">Pilih daftar putar</span><select aria-label="Pilih daftar putar" className="max-w-[170px] bg-transparent text-xs text-zinc-700 outline-none" value={activePlaylist?.id ?? ''} onChange={(e) => onSelectPlaylist(Number(e.target.value))}>{playlists.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label></div>} />
+  return <><SectionHeading eyebrow="Pemutaran" title="Pemutar" description="Putar video yang dapat disematkan melalui pemutar resmi Facebook." action={<div className="flex items-center gap-2"><Button variant="secondary" onClick={() => setMultiView(true)}><LayoutGrid className="size-3.5" />Tampilan serentak</Button><label className="flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-xs text-zinc-500"><ListMusic className="size-4" /><span className="sr-only">Pilih daftar putar</span><select aria-label="Pilih daftar putar" className="max-w-[170px] bg-transparent text-xs text-zinc-700 outline-none" value={activePlaylist?.id ?? ''} onChange={(e) => onSelectPlaylist(e.target.value)}>{playlists.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label></div>} />
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1.7fr)_minmax(300px,.8fr)]"><div className="min-w-0"><Panel className="overflow-hidden"><div className="relative flex aspect-video items-center justify-center bg-[#101114]">{validFacebookUrl ? <FacebookVideoEmbed
       key={currentVideo?.id}
       url={validFacebookUrl}
@@ -166,7 +382,9 @@ function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVi
       autoPlay={preferences.autoPlay}
       muted={preferences.muted}
       width={1280}
+      onReady={() => { if (currentVideo) onVideoReady(currentVideo.id) }}
       onFinished={(player) => {
+        if (currentVideo) onVideoFinished(currentVideo.id)
         if (!preferences.autoPlayNext) {
           if (preferences.loop) {
             player.seek(0)
@@ -179,8 +397,8 @@ function SinglePlayerPage({ playlists, activePlaylist, playlistVideos, currentVi
       }}
     /> : <div className="px-6 text-center text-white"><Film className="mx-auto mb-3 size-8 text-zinc-500" /><p className="text-sm font-medium">{currentVideo ? 'Tautan ini perlu diperiksa sebelum disematkan di Facebook' : 'Pilih video untuk memulai'}</p><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-zinc-400">Privasi video dan pengaturan penerbit menentukan apakah Facebook mengizinkan sematan ini diputar.</p></div>}</div><div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 px-4 py-3.5"><div className="min-w-0"><p className="truncate text-xs font-semibold text-zinc-800">{currentVideo?.title ?? 'Belum ada video yang dipilih'}</p><p className="mt-1 text-[10px] text-zinc-400">{activePlaylist?.name ?? 'Belum ada daftar putar'} · {playlistVideos.length ? `${currentIndex + 1} dari ${playlistVideos.length}` : '0 video'}</p></div><div className="flex items-center gap-1"><Button variant="quiet" disabled={currentIndex === 0} onClick={onPrevious}><SkipBack className="size-4" /><span className="sr-only">Video sebelumnya</span></Button><Button variant="quiet" disabled={currentIndex >= playlistVideos.length - 1} onClick={onNext}><SkipForward className="size-4" /><span className="sr-only">Video berikutnya</span></Button></div></div></Panel>
       <div className="mt-3 flex items-start gap-2 rounded-lg border border-blue-100 bg-blue-50/70 px-3 py-2.5 text-[11px] leading-5 text-blue-800"><CircleHelp className="mt-0.5 size-3.5 shrink-0" /><p>Putar otomatis, perpindahan antar-Reel, dan pengulangan menggunakan peristiwa dari pemutar Facebook. Pengaturan privasi Facebook, kebijakan peramban, atau sematan yang diblokir dapat menghambat fitur ini.</p></div></div>
-      <div className="flex min-w-0 flex-col gap-4"><Panel className="flex min-h-[355px] flex-1 flex-col"><PanelTitle note={`${playlistVideos.length} video · urutan sementara`} action={<span className="text-[10px] text-zinc-400">{activePlaylist?.name ?? 'Daftar putar'}</span>}>Antrian</PanelTitle><div className="flex-1 divide-y divide-zinc-100 overflow-y-auto">{playlistVideos.map((video, index) => <button key={video.id} onClick={() => onSelectVideo(index)} className={cx('flex w-full items-center gap-3 px-4 py-3.5 text-left', currentIndex === index ? 'bg-blue-50/60' : 'hover:bg-zinc-50')}><span className={cx('flex size-7 shrink-0 items-center justify-center rounded-md text-[10px] font-medium', currentIndex === index ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-500')}>{index + 1}</span><span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-700">{video.title}</span>{currentIndex === index && <span className="text-[9px] font-medium uppercase tracking-wider text-blue-600">Terpilih</span>}</button>)}{!playlistVideos.length && <EmptyState title="Daftar putar ini masih kosong" description="Tambahkan video di pengelola daftar putar untuk melihat pratinjaunya di sini." />}</div></Panel>
-      <Panel><PanelTitle>Preferensi pemutaran <span className="ml-1 text-[10px] font-normal text-zinc-400">· khusus sesi ini</span></PanelTitle><div className="divide-y divide-zinc-100 px-4">{[{ key: 'autoPlay' as const, label: 'Putar otomatis Reel ini', description: 'Mulai tanpa suara jika diizinkan oleh Facebook dan peramban.' }, { key: 'autoPlayNext' as const, label: 'Lanjut otomatis ke Reel berikutnya', description: 'Beralih ke Reel berikutnya setelah pemutaran selesai.' }, { key: 'loop' as const, label: 'Ulangi daftar putar', description: 'Mulai kembali dari awal setelah Reel terakhir.' }].map((item) => <label key={item.key} className="flex cursor-pointer items-center justify-between gap-3 py-3"><span><span className="block text-xs font-medium text-zinc-700">{item.label}</span><span className="mt-0.5 block text-[10px] text-zinc-400">{item.description}</span></span><input type="checkbox" checked={preferences[item.key]} onChange={(e) => setPreferences({ ...preferences, [item.key]: e.target.checked })} className="size-4 accent-blue-600" /></label>)}</div></Panel></div></div>
+      <div className="flex min-w-0 flex-col gap-4"><Panel className="flex min-h-[355px] flex-1 flex-col">      <PanelTitle note={`${playlistVideos.length} video · urutan tersimpan`} action={<span className="text-[10px] text-zinc-400">{activePlaylist?.name ?? 'Daftar putar'}</span>}>Antrian</PanelTitle><div className="flex-1 divide-y divide-zinc-100 overflow-y-auto">{playlistVideos.map((video, index) => <button key={video.id} onClick={() => onSelectVideo(index)} className={cx('flex w-full items-center gap-3 px-4 py-3.5 text-left', currentIndex === index ? 'bg-blue-50/60' : 'hover:bg-zinc-50')}><span className={cx('flex size-7 shrink-0 items-center justify-center rounded-md text-[10px] font-medium', currentIndex === index ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-500')}>{index + 1}</span><span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-700">{video.title}</span>{currentIndex === index && <span className="text-[9px] font-medium uppercase tracking-wider text-blue-600">Terpilih</span>}</button>)}{!playlistVideos.length && <EmptyState title="Daftar putar ini masih kosong" description="Tambahkan video dari pustaka." />}</div></Panel>
+      <Panel><PanelTitle>Preferensi pemutaran <span className="ml-1 text-[10px] font-normal text-zinc-400">· tersimpan</span></PanelTitle><div className="divide-y divide-zinc-100 px-4">{[{ key: 'autoPlay' as const, label: 'Putar otomatis Reel ini', description: 'Mulai tanpa suara jika diizinkan oleh Facebook dan peramban.' }, { key: 'autoPlayNext' as const, label: 'Lanjut otomatis ke Reel berikutnya', description: 'Beralih ke Reel berikutnya setelah pemutaran selesai.' }, { key: 'loop' as const, label: 'Ulangi daftar putar', description: 'Mulai kembali dari awal setelah Reel terakhir.' }].map((item) => <label key={item.key} className="flex cursor-pointer items-center justify-between gap-3 py-3"><span><span className="block text-xs font-medium text-zinc-700">{item.label}</span><span className="mt-0.5 block text-[10px] text-zinc-400">{item.description}</span></span><input type="checkbox" checked={preferences[item.key]} onChange={(e) => setPreferences({ ...preferences, [item.key]: e.target.checked })} className="size-4 accent-blue-600" /></label>)}</div></Panel></div></div>
   </>
 }
 
@@ -197,7 +415,7 @@ function MultiPlayerPage({ playlists, activePlaylist, playlistVideos, currentInd
         <label className="flex h-9 items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 text-xs text-zinc-500">
           <ListMusic className="size-4" />
           <span className="sr-only">Pilih daftar putar</span>
-          <select aria-label="Pilih daftar putar" className="max-w-[170px] bg-transparent text-xs text-zinc-700 outline-none" value={activePlaylist?.id ?? ''} onChange={(e) => onSelectPlaylist(Number(e.target.value))}>
+          <select aria-label="Pilih daftar putar" className="max-w-[170px] bg-transparent text-xs text-zinc-700 outline-none" value={activePlaylist?.id ?? ''} onChange={(e) => onSelectPlaylist(e.target.value)}>
             {playlists.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>
@@ -261,7 +479,7 @@ function MultiPlayerPage({ playlists, activePlaylist, playlistVideos, currentInd
           </div>
         </Panel>
         <Panel>
-          <PanelTitle>Preferensi pemutaran <span className="ml-1 text-[10px] font-normal text-zinc-400">· khusus sesi ini</span></PanelTitle>
+          <PanelTitle>Preferensi pemutaran <span className="ml-1 text-[10px] font-normal text-zinc-400">· tersimpan</span></PanelTitle>
           <div className="divide-y divide-zinc-100 px-4">
             {[
               { key: 'autoPlay' as const, label: 'Putar otomatis Reel terpilih' },
@@ -277,19 +495,21 @@ function MultiPlayerPage({ playlists, activePlaylist, playlistVideos, currentInd
   </>
 }
 
-function HistoryPage() { return <><SectionHeading eyebrow="Wawasan" title="Riwayat pemutaran" description="Aktivitas yang dicatat aplikasi ini, bukan analitik tayangan Facebook." /><Panel><PanelTitle note="Belum ada aktivitas yang terpantau aplikasi dan tersimpan di pratinjau ini." action={<Button variant="secondary"><Search className="size-3.5" />Cari</Button>}>Aktivitas terbaru</PanelTitle><EmptyState title="Riwayat masih kosong" description="Aktivitas pemutaran tidak dilacak oleh pratinjau antarmuka ini. Jumlah tayangan atau interaksi Facebook tidak pernah diperkirakan." /><div className="border-t border-zinc-100 px-5 py-3 text-[10px] text-zinc-400">Penyaringan tanggal dan penomoran halaman memerlukan penyimpanan aktivitas permanen.</div></Panel></> }
-function SettingsPage({ preferences, setPreferences }: { preferences: PlaybackPreferences; setPreferences: (value: PlaybackPreferences) => void }) {
+function HistoryPage({ activities }: { activities: PlaybackActivity[] }) {
+  return <><SectionHeading eyebrow="Wawasan" title="Riwayat pemutaran" description="Event yang diamati oleh aplikasi, bukan analitik tayangan Facebook." /><Panel><PanelTitle note={`${activities.length} event terakhir tersimpan`}>Aktivitas terbaru</PanelTitle>{activities.length ? <div className="divide-y divide-zinc-100">{activities.map((activity) => <div key={activity.id} className="flex flex-wrap items-center gap-3 px-5 py-4"><Activity className="size-4 text-zinc-400" /><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-zinc-800">{activityLabels[activity.eventType] ?? activity.eventType} · {activity.videoTitle}</p><p className="mt-1 truncate text-[11px] text-zinc-400">{activity.playlistName}</p></div><time className="text-[11px] text-zinc-500" dateTime={activity.createdAt}>{new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Jakarta' }).format(new Date(activity.createdAt))}</time></div>)}</div> : <EmptyState title="Belum ada aktivitas pemutaran" description="Event yang didukung akan muncul di sini saat pemutar mengamatinya. Tidak ada statistik Facebook yang diperkirakan." />}</Panel></>
+}
+function SettingsPage({ preferences, setPreferences, admin, appSettings }: { preferences: PlaybackPreferences; setPreferences: (value: PlaybackPreferences) => void; admin: { name: string; email: string }; appSettings: { appName: string; timezone: string } }) {
   return <>
     <SectionHeading
       eyebrow="Preferensi"
       title="Pengaturan"
-      description="Pengaturan ini hanya berlaku selama sesi pratinjau antarmuka."
-      action={<Button variant="secondary" onClick={() => setPreferences({ autoPlay: true, autoPlayNext: true, loop: true, shuffle: false, muted: true, maxConcurrent: 20 })}><Check className="size-3.5" />Atur ulang preferensi</Button>}
+      description="Preferensi pemutaran tersimpan di PostgreSQL."
+      action={<Button variant="secondary" onClick={() => setPreferences({ autoPlay: false, autoPlayNext: false, loop: false, shuffle: false, muted: true, maxConcurrent: 20 })}><Check className="size-3.5" />Atur ulang preferensi</Button>}
     />
     <div className="grid gap-5 xl:grid-cols-[1fr_310px]">
       <div className="space-y-5">
         <Panel>
-          <PanelTitle note="Pengaturan ini hanya mengubah sesi peramban saat ini.">Preferensi pemutaran</PanelTitle>
+          <PanelTitle note="Perubahan disimpan otomatis.">Preferensi pemutaran</PanelTitle>
           <div className="divide-y divide-zinc-100 px-5">
             {[
               { key: 'autoPlay' as const, label: 'Putar Reel otomatis', desc: 'Mulai sematan terpilih secara otomatis; suara dibisukan dan pemutaran otomatis dapat dibatasi oleh peramban atau Facebook.' },
@@ -304,7 +524,7 @@ function SettingsPage({ preferences, setPreferences }: { preferences: PlaybackPr
           </div>
         </Panel>
         <Panel>
-          <PanelTitle note="Pengaturan administrator pratinjau · hanya berlaku selama sesi peramban ini.">Pemutaran serentak</PanelTitle>
+          <PanelTitle note="Batas ini disimpan untuk sesi berikutnya.">Pemutaran serentak</PanelTitle>
           <div className="flex flex-wrap items-center justify-between gap-4 p-5">
             <div>
               <label htmlFor="max-concurrent-reels" className="text-xs font-medium text-zinc-700">Jumlah maksimum Reel bersamaan</label>
@@ -322,10 +542,10 @@ function SettingsPage({ preferences, setPreferences }: { preferences: PlaybackPr
           </div>
         </Panel>
         <Panel>
-          <PanelTitle note="Identitas aplikasi tidak disimpan dalam mode pratinjau.">Aplikasi</PanelTitle>
+          <PanelTitle note="Pengaturan aplikasi.">Aplikasi</PanelTitle>
           <div className="grid gap-4 p-5 sm:grid-cols-2">
-            <label className="text-xs font-medium text-zinc-600">Nama aplikasi<input value="Framewise" readOnly className="mt-2 block h-9 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 text-xs text-zinc-500" /></label>
-            <label className="text-xs font-medium text-zinc-600">Zona waktu<input value="UTC" readOnly className="mt-2 block h-9 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 text-xs text-zinc-500" /></label>
+            <label className="text-xs font-medium text-zinc-600">Nama aplikasi<input value={appSettings.appName} readOnly className="mt-2 block h-9 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 text-xs text-zinc-500" /></label>
+            <label className="text-xs font-medium text-zinc-600">Zona waktu<input value={appSettings.timezone} readOnly className="mt-2 block h-9 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 text-xs text-zinc-500" /></label>
           </div>
         </Panel>
       </div>
@@ -334,17 +554,18 @@ function SettingsPage({ preferences, setPreferences }: { preferences: PlaybackPr
         <div className="p-5">
           <div className="mb-4 flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-full bg-zinc-100 text-sm font-semibold text-zinc-500">AD</div>
-            <div><p className="text-xs font-medium text-zinc-700">Administrator pratinjau</p><p className="mt-1 text-[11px] text-zinc-400">Tidak ada akun yang terhubung</p></div>
+            <div><p className="text-xs font-medium text-zinc-700">{admin.name}</p><p className="mt-1 text-[11px] text-zinc-400">{admin.email}</p></div>
           </div>
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-            <p className="text-[11px] font-semibold text-amber-900">Autentikasi dinonaktifkan</p>
-            <p className="mt-1 text-[10px] leading-4 text-amber-800">Pratinjau ini tidak dilindungi proses masuk. Jangan paparkan sebagai sistem administrator.</p>
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+            <p className="text-[11px] font-semibold text-emerald-900">Sesi administrator aktif</p>
+            <p className="mt-1 text-[10px] leading-4 text-emerald-800">Kredensial login dikelola melalui variabel lingkungan server.</p>
           </div>
+          <form action={logoutAction} className="mt-4"><button type="submit" className="text-xs font-medium text-zinc-600 hover:text-zinc-900">Keluar</button></form>
         </div>
       </Panel>
     </div>
   </>
 }
-function Dialog({ title, onClose, onSubmit, error, kind }: { title: string; onClose: () => void; onSubmit: (form: FormData) => void; error: string; kind: 'video' | 'playlist' }) {
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/35 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}><div role="dialog" aria-modal="true" aria-labelledby="dialog-title" className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl"><div className="flex items-start justify-between"><div><h2 id="dialog-title" className="text-base font-semibold text-zinc-900">{title}</h2><p className="mt-1 text-xs text-zinc-500">Item yang ditambahkan akan hilang saat halaman dimuat ulang.</p></div><button onClick={onClose} aria-label="Tutup dialog" className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100"><X className="size-4" /></button></div><form action={onSubmit} className="mt-5 flex flex-col gap-4">{kind === 'video' ? <><label className="text-xs font-medium text-zinc-700">URL video Facebook <span className="text-red-500">*</span><input name="url" type="url" required placeholder="https://www.facebook.com/watch/?v=…" className="mt-2 h-10 w-full rounded-lg border border-zinc-200 px-3 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label><label className="text-xs font-medium text-zinc-700">Judul <span className="font-normal text-zinc-400">(opsional)</span><input name="title" maxLength={120} placeholder="Beri nama untuk video ini" className="mt-2 h-10 w-full rounded-lg border border-zinc-200 px-3 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label></> : <><label className="text-xs font-medium text-zinc-700">Nama daftar putar<input name="name" required maxLength={80} placeholder="Contoh: Sorotan proyek" className="mt-2 h-10 w-full rounded-lg border border-zinc-200 px-3 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label><label className="text-xs font-medium text-zinc-700">Deskripsi <span className="font-normal text-zinc-400">(opsional)</span><textarea name="description" rows={3} maxLength={240} placeholder="Apa saja isi daftar putar ini?" className="mt-2 w-full resize-none rounded-lg border border-zinc-200 px-3 py-2 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label></>}{error && <p role="alert" className="text-xs text-red-600">{error}</p>}<div className="mt-1 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Batal</Button><button type="submit" className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-3 text-[13px] font-medium text-white hover:bg-blue-700">{kind === 'video' ? <Plus className="size-4" /> : <FolderPlus className="size-4" />}{kind === 'video' ? 'Tambah video' : 'Buat daftar putar'}</button></div></form></div></div>
+function Dialog({ title, onClose, onSubmit, error, kind }: { title: string; onClose: () => void; onSubmit: (form: FormData) => void | Promise<void>; error: string; kind: 'video' | 'playlist' }) {
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/35 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}><div role="dialog" aria-modal="true" aria-labelledby="dialog-title" className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-xl"><div className="flex items-start justify-between"><div><h2 id="dialog-title" className="text-base font-semibold text-zinc-900">{title}</h2><p className="mt-1 text-xs text-zinc-500">Perubahan disimpan ke PostgreSQL.</p></div><button onClick={onClose} aria-label="Tutup dialog" className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100"><X className="size-4" /></button></div><form action={onSubmit} className="mt-5 flex flex-col gap-4">{kind === 'video' ? <><label className="text-xs font-medium text-zinc-700">URL video Facebook <span className="text-red-500">*</span><input name="url" type="url" required placeholder="https://www.facebook.com/watch/?v=…" className="mt-2 h-10 w-full rounded-lg border border-zinc-200 px-3 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label><label className="text-xs font-medium text-zinc-700">Judul <span className="font-normal text-zinc-400">(opsional)</span><input name="title" maxLength={120} placeholder="Beri nama untuk video ini" className="mt-2 h-10 w-full rounded-lg border border-zinc-200 px-3 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label></> : <><label className="text-xs font-medium text-zinc-700">Nama daftar putar<input name="name" required maxLength={80} placeholder="Contoh: Sorotan proyek" className="mt-2 h-10 w-full rounded-lg border border-zinc-200 px-3 py-2 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label><label className="text-xs font-medium text-zinc-700">Deskripsi <span className="font-normal text-zinc-400">(opsional)</span><textarea name="description" rows={3} maxLength={240} placeholder="Apa saja isi daftar putar ini?" className="mt-2 w-full resize-none rounded-lg border border-zinc-200 px-3 py-2 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100" /></label></>}{error && <p role="alert" className="text-xs text-red-600">{error}</p>}<div className="mt-1 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Batal</Button><button type="submit" className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-3 text-[13px] font-medium text-white hover:bg-blue-700">{kind === 'video' ? <Plus className="size-4" /> : <FolderPlus className="size-4" />}{kind === 'video' ? 'Tambah video' : 'Buat daftar putar'}</button></div></form></div></div>
 }

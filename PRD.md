@@ -140,13 +140,14 @@ State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas pro
 
 ## 6. Model Data Target
 
-Model berikut sudah didefinisikan di `prisma/schema.prisma` dan migration awal tersedia di `prisma/migrations/0001_initial/migration.sql`. Migration belum diterapkan pada database PostgreSQL, sehingga schema belum diverifikasi terhadap database produksi.
+Model berikut didefinisikan di `prisma/schema.prisma`. Migration awal tersedia di `prisma/migrations/0001_initial/migration.sql`; migration berikutnya menambahkan preferensi tersimpan dan pembatasan percobaan login. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
 
 ### `User`, `Session`, `Account`, `Verification`
 
 - Schema `User` berisi `id`, `name`, `email` (unik), `emailVerified`, `image`, `role` (default `ADMIN`), `createdAt`, dan `updatedAt`.
 - Model `Session`, `Account`, dan `Verification` disiapkan untuk adapter autentikasi.
-- Password tidak disimpan plaintext; kolom `Account.password` disediakan untuk hash yang dikelola oleh pustaka autentikasi. Login, hashing, sesi aktif, dan bootstrap admin belum diimplementasikan.
+- Login administrator memakai `ADMIN_EMAIL` dan `ADMIN_PASSWORD` dari environment. Identitas administrator dibuat/diperbarui setelah login valid; session disimpan di PostgreSQL dan cookie hanya berisi token acak yang hash HMAC-nya tersimpan di database. Password environment tidak disimpan ke tabel.
+- `LoginAttempt` menyimpan kunci IP yang di-HMAC, jumlah percobaan, dan waktu blokir; alamat IP mentah tidak disimpan.
 
 ### `Video`
 
@@ -174,8 +175,8 @@ Model berikut sudah didefinisikan di `prisma/schema.prisma` dan migration awal t
 
 ### `AppSettings`
 
-- Schema saat ini mencakup `id` (singleton `global`), `autoPlayNext`, `loopPlaylist`, `shufflePlaylist`, `autoplay`, `endBehavior`, `appName`, `timezone`, `dateFormat`, `logRetentionDays`, `createdAt`, dan `updatedAt`.
-- Schema tersedia; halaman Settings saat ini hanya menampilkan preferensi sementara dan beberapa nilai contoh yang read-only.
+- Schema saat ini mencakup `id` (singleton `global`), `autoPlayNext`, `loopPlaylist`, `shufflePlaylist`, `autoplay`, `muted`, `maxConcurrent`, `endBehavior`, `appName`, `timezone`, `dateFormat`, `logRetentionDays`, `createdAt`, dan `updatedAt`.
+- Toggle preferensi pemutaran dan batas pemutaran serentak disimpan; pengaturan identitas aplikasi masih read-only.
 
 ### Kepemilikan dan isolasi
 
@@ -240,10 +241,10 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 ## 10. Teknologi dan Infrastruktur Target
 
 - UI saat ini: Next.js 16 App Router, React 19, TypeScript, Tailwind CSS 4, Lucide React, dan komponen lokal; package shadcn CLI tersedia, tetapi dashboard belum memakai komponen shadcn.
-- Server: halaman dashboard App Router tersedia; Route Handlers/Server Actions untuk data masih target dan belum diimplementasikan.
-- Data target: PostgreSQL melalui Prisma 7 dan `@prisma/adapter-pg`; schema serta adapter sudah ada, tetapi belum tersambung ke database.
-- Validasi: Zod sudah menjadi dependency; validasi server-side belum dibuat. Form video pada preview hanya memeriksa URL di browser.
-- Embed saat ini menggunakan iframe plugin Facebook untuk contoh video; Facebook JavaScript SDK dan event API belum diintegrasikan.
+- Server: Server Actions terautentikasi menangani video, playlist, preferensi, dan event pemutaran; layout dashboard memuat data melalui Prisma.
+- Data: PostgreSQL melalui Prisma 7 dan `@prisma/adapter-pg`; deployment harus menerapkan migration dengan `prisma migrate deploy`.
+- Validasi: input login, URL, playlist, dan preferensi divalidasi server-side dengan Zod. URL video dibatasi HTTPS dan host Facebook yang didukung.
+- Embed menggunakan Facebook JavaScript SDK; event `xfbml.ready` dan `finishedPlaying` dicatat hanya pada pemutar tunggal.
 - Hosting target: Ubuntu VPS, Node.js, environment variables, reverse proxy Nginx; Docker opsional.
 - Header keamanan dasar dikonfigurasi pada Next.js. Rahasia dan konfigurasi hanya berasal dari environment/secret store, tidak di-commit.
 
@@ -252,6 +253,8 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 Rencana deployment harus mencakup: checkout kode, instalasi dependency yang terkunci, konfigurasi environment produksi, provisioning PostgreSQL, migration terkontrol, bootstrap admin yang aman, build aplikasi, service manager/container, TLS, Nginx reverse proxy, backup database, rotasi secret, logging/monitoring, dan prosedur rollback.
 
 Variabel yang dibutuhkan harus ditentukan final sebelum implementasi deployment, sekurangnya koneksi database, secret sesi/auth, URL canonical aplikasi bila diperlukan, serta variabel Facebook hanya bila SDK resmi memerlukannya. Nilai rahasia tidak boleh dimasukkan dalam dokumentasi atau repository.
+
+Untuk database existing yang tabelnya dibuat sebelum Prisma migration history tersedia, backup dahulu dan pastikan schema cocok dengan `0001_initial`. Setelah itu jalankan `npx prisma migrate resolve --applied 0001_initial` satu kali untuk baseline, lalu `npx prisma migrate deploy` untuk menerapkan migration baru. Database kosong sebaiknya langsung menggunakan `npx prisma migrate deploy`. Jangan gunakan `prisma db push` pada deployment produksi.
 
 ## 12. Kriteria Penerimaan Rilis Produksi
 
@@ -284,46 +287,34 @@ Variabel yang dibutuhkan harus ditentukan final sebelum implementasi deployment,
 
 ## 13. Tahapan Implementasi
 
-1. **Foundation (sebagian):** aplikasi dan UI preview tersedia; schema Prisma, migration awal, adapter PostgreSQL, lint, dan typecheck sudah disiapkan. Koneksi database, penerapan migration, dan konfigurasi environment masih menunggu.
-2. **Authentication:** bootstrap admin, login/logout, sesi aman, perlindungan halaman dan API.
-3. **Dashboard shell:** sidebar responsif, header, dashboard terhubung ke data.
-4. **Content management:** CRUD video, CRUD playlist, detail, pencarian, filter, pagination, reorder.
-5. **Facebook player:** verifikasi API resmi, embed lifecycle, kontrol/event yang didukung, fallback.
-6. **History and settings:** pencatatan event observabel, pencarian/filter, preferensi tersimpan.
-7. **Production:** pengujian end-to-end, keamanan, responsive QA, build, migration, deployment VPS dan runbook.
+1. **Foundation (sebagian):** schema Prisma, adapter PostgreSQL, dan tiga migration tersedia; penerapan migration produksi masih perlu dilakukan.
+2. **Authentication (implementasi awal):** login/logout, sesi database, proteksi halaman/mutasi, dan pembatasan percobaan login tersedia.
+3. **Dashboard shell:** dashboard membaca ringkasan dari PostgreSQL.
+4. **Content management (sebagian):** tambah/hapus video, playlist, dan keanggotaan video tersimpan; edit, filter, pagination, serta reorder belum tersedia.
+5. **Facebook player (sebagian):** embed resmi dipakai; event yang tersedia pada pemutar tunggal dicatat.
+6. **History and settings (sebagian):** riwayat event pemutar tunggal dan preferensi dasar tersimpan; filter riwayat dan semua pengaturan aplikasi belum tersedia.
+7. **Production:** pengujian end-to-end, penerapan migration, deployment VPS, dan runbook masih perlu diverifikasi.
 
 ## 14. Status Implementasi Saat Ini
 
-### Yang tampak pada web preview
+### Implementasi yang tersedia di repository
 
-- Root mengarahkan ke `/dashboard`; satu dashboard responsif memuat Overview, Videos, Playlists, Player, Playback history, dan Settings melalui navigasi sisi desktop serta drawer/overlay mobile.
-- Antarmuka berbahasa Inggris, dengan latar netral terang, panel putih, dan aksen biru.
-- Overview menampilkan jumlah contoh video/playlist, status player idle, aktivitas kosong, playlist, dan quick actions. Nilai tersebut bukan data produksi.
-- Videos menampilkan tabel dengan pencarian browser, tombol filter UI, dialog tambah URL/judul, dan hapus. Validasi URL hanya di browser; perubahan berada dalam React state dan hilang saat refresh. Pagination dan filter belum berfungsi.
-- Playlists mendukung dialog buat, pilih playlist, toggle video, dan hapus pada state lokal. Edit, penyimpanan, detail route, dan reorder belum tersedia.
-- Player menampilkan iframe Facebook untuk URL contoh, playlist selector/queue, pemilihan item, previous/next, dan preferensi sementara. Embed tidak dipastikan tersedia, event lifecycle tidak dilacak, dan auto-advance tidak berjalan.
-- Playback history selalu empty; tombol Search belum terhubung. Settings berisi toggle sesi dan field aplikasi contoh/read-only.
-- UI dengan sengaja menampilkan banner preview dan tidak mengklaim menyimpan data atau merekam view Facebook.
+- `/dashboard` mewajibkan sesi administrator. Login memakai `ADMIN_EMAIL`, `ADMIN_PASSWORD`, dan `BETTER_AUTH_SECRET`; sesi tersimpan di tabel `Session` dan cookie HTTP-only/Secure pada production. Tidak ada registrasi publik.
+- Dashboard memuat video, playlist, pengaturan, dan ringkasan aktivitas dari PostgreSQL melalui Prisma. Mutasi dilakukan dengan Server Actions yang memeriksa sesi dan memvalidasi input.
+- Video dapat ditambahkan/dihapus; playlist dapat dibuat/dihapus dan item video dapat ditambahkan/dikeluarkan. Preferensi pemutaran disimpan di `AppSettings`.
+- Pemutar tunggal mencatat `SESSION_STARTED`, `VIDEO_LOADED`, `NEXT_VIDEO_LOADED`, `FINISHED_PLAYING`, dan `SESSION_STOPPED` saat event yang didukung diamati. Ini bukan statistik tayangan Facebook.
+- Migration `0002_persist_playback_preferences` menambahkan kolom preferensi yang tidak ada pada skema awal; `0003_login_attempt_rate_limit` menambahkan tabel pembatasan login.
 
-### Fondasi kode yang tersedia di repository
+### Belum tersedia
 
-- Prisma 7 schema PostgreSQL dan migration SQL awal untuk autentikasi, video, playlist, playback session/log, serta pengaturan.
-- Prisma PostgreSQL adapter, konfigurasi CLI, `.env.example`, dan script generate/migrate/build telah ditambahkan.
-- Migration SQL dibuat dari schema secara offline dan belum dijalankan terhadap database. Tidak ada koneksi database aktif atau data pengguna.
-- ESLint dan pemeriksaan TypeScript tersedia; Prisma schema valid. Header keamanan dasar dikonfigurasi pada Next.js.
+- Edit metadata video/playlist, drag-and-drop reorder, filter/pagination, dan pengaturan aplikasi yang dapat diedit.
+- Pencatatan lifecycle pemutaran untuk tampilan serentak; hanya event pemutar tunggal yang dicatat.
+- Pengujian end-to-end dan konfigurasi rate-limit yang mempercayai IP dari reverse proxy harus diverifikasi pada VPS.
+- Migration produksi belum dijalankan otomatis dari repository ini. VPS harus dibackup dan menyiapkan migration baseline untuk tabel yang telah ada sebelum menerapkan `0002`.
 
-### Belum tersedia — jangan dianggap production-ready
+### Konfigurasi dan deployment
 
-- Database PostgreSQL terhubung, migration diterapkan, atau data persisten.
-- Login, sesi autentikasi, bootstrap admin, otorisasi server, dan rate limiting.
-- API backend yang terlindungi; seluruh pengelolaan UI masih lokal/sample.
-- Drag-and-drop reorder, pencarian/filter/pagination server-side, atau pengaturan tersimpan.
-- Event Facebook yang tervalidasi, auto-advance berdasarkan event, dan playback history yang tercatat.
-- Test end-to-end, build/deploy produksi, serta konfigurasi dan runbook VPS.
-
-### Konfigurasi yang diperlukan untuk melanjutkan
-
-Pemeriksaan konfigurasi proyek terakhir menunjukkan belum ada environment variables. `DATABASE_URL` diperlukan untuk menghubungkan dan memigrasikan PostgreSQL yang dipilih; `BETTER_AUTH_SECRET` diperlukan sebelum konfigurasi Better Auth dibuat. Pengguna melewati prompt setup variabel, jadi migration live, autentikasi, dan API terlindungi belum dijalankan atau dibuat. Nilai rahasia tidak boleh ditulis ke PRD, source code, atau repository; tambahkan melalui Vars proyek sebelum melanjutkan backend.
+Sediakan `DATABASE_URL`, `BETTER_AUTH_SECRET` (minimal 32 karakter), `ADMIN_EMAIL`, dan `ADMIN_PASSWORD` melalui environment/secret store server. Untuk database existing tanpa tabel `_prisma_migrations`, pastikan schema cocok dengan `0001_initial`, jalankan `npx prisma migrate resolve --applied 0001_initial` satu kali, lalu `npx prisma migrate deploy` untuk `0002` dan `0003`. Jangan menyimpan kredensial produksi di `.env.example`, source code, atau repository.
 
 ## 15. Risiko dan Asumsi
 

@@ -98,22 +98,25 @@ type FacebookVideoEmbedProps = {
   autoPlay: boolean
   muted: boolean
   width: number
+  onReady?: () => void
   onFinished?: (player: FacebookVideoPlayer) => void
 }
 
-export function FacebookVideoEmbed({ url, title, autoPlay, muted, width, onFinished }: FacebookVideoEmbedProps) {
+export function FacebookVideoEmbed({ url, title, autoPlay, muted, width, onReady, onFinished }: FacebookVideoEmbedProps) {
   const generatedId = useId().replace(/:/g, '')
   const playerId = `facebook-video-${generatedId}`
   const containerRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<FacebookVideoPlayer | null>(null)
+  const onReadyRef = useRef(onReady)
   const onFinishedRef = useRef(onFinished)
   const optionsRef = useRef({ autoPlay, muted })
   const [error, setError] = useState('')
 
   useEffect(() => {
+    onReadyRef.current = onReady
     onFinishedRef.current = onFinished
     optionsRef.current = { autoPlay, muted }
-  }, [autoPlay, muted, onFinished])
+  }, [autoPlay, muted, onReady, onFinished])
 
   useEffect(() => {
     const container = containerRef.current
@@ -152,6 +155,7 @@ export function FacebookVideoEmbed({ url, title, autoPlay, muted, width, onFinis
         const player = message.instance
         playerRef.current = player
         finishedSubscription = player.subscribe('finishedPlaying', () => onFinishedRef.current?.(player))
+        onReadyRef.current?.()
         if (optionsRef.current.autoPlay) {
           if (optionsRef.current.muted) player.mute()
           else player.unmute()

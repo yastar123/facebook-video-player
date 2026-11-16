@@ -90,6 +90,14 @@ model Verification {
   @@index([identifier])
 }
 
+model LoginAttempt {
+  key             String    @id
+  attempts        Int       @default(0)
+  windowStartedAt DateTime  @default(now())
+  blockedUntil    DateTime?
+  updatedAt       DateTime  @updatedAt
+}
+
 model Video {
   id              String               @id @default(cuid())
   title           String
@@ -172,6 +180,8 @@ model AppSettings {
   loopPlaylist    Boolean  @default(false)
   shufflePlaylist Boolean  @default(false)
   autoplay        Boolean  @default(false)
+  muted           Boolean  @default(true)
+  maxConcurrent   Int      @default(20)
   endBehavior     String   @default("STOP")
   appName         String   @default("Facebook Video Player")
   timezone        String   @default("UTC")
