@@ -3,9 +3,9 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Facebook Video Player — Library & Playback',
-  description: 'Organize Facebook video embeds and playlists in one workspace.',
-  applicationName: 'Facebook Video Player',
+  title: 'Pemutar Video Facebook — Pustaka & Pemutaran',
+  description: 'Kelola sematan video Facebook dan daftar putar dalam satu ruang kerja.',
+  applicationName: 'Pemutar Video Facebook',
   icons: {
     icon: [
       { url: '/icon-light-32x32.png', media: '(prefers-color-scheme: light)' },
@@ -23,7 +23,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="id">
       <body className="antialiased">
         {children}
         {process.env.NODE_ENV === 'production' && <Analytics />}
