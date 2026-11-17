@@ -150,8 +150,10 @@ export async function POST(request: Request) {
 
   try {
     if (parsed.data.command === 'health') return jsonResponse(await callRuntime('/health', 'GET'))
+    const playerOrigin = request.headers.get('origin')
+    if (!playerOrigin) return jsonResponse({ error: 'Request origin is required.' }, 403)
     const commandBody = parsed.data.command === 'start'
-      ? { command: parsed.data.command, playlistId: parsed.data.playlistId }
+      ? { command: parsed.data.command, playlistId: parsed.data.playlistId, playerOrigin: new URL(playerOrigin).origin }
       : { command: parsed.data.command }
     return jsonResponse(await callRuntime('/control', 'POST', commandBody))
   } catch (error) {

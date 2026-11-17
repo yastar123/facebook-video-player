@@ -90,6 +90,7 @@ let currentVideoId: string | null = null
 let currentPosition = 0
 let currentEmbedGeneration = 0
 let currentTimeSeconds = 0
+let remotePlayerOrigin: string | null = null
 let playbackStartedAt: Date | null = null
 let lastPlaybackEventAt: Date | null = null
 let resumeOnStart = false
@@ -111,6 +112,21 @@ function sanitizeDiagnostic(value: string) {
     .replace(/(postgres(?:ql)?:\/\/[^:\s]+:)[^@\s]+@/gi, '$1[REDACTED]@')
     .replace(/[\r\n\t]+/g, ' ')
     .slice(0, 500)
+}
+
+function getPlayerOrigin(value: unknown) {
+  if (typeof value !== 'string') return null
+  try {
+    const url = new URL(value)
+    if (url.origin !== value) return null
+    const isHttps = url.protocol === 'https:'
+    const isLocalDevelopmentOrigin = url.protocol === 'http:'
+      && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+      && url.port !== String(runtimePort)
+    return isHttps || isLocalDevelopmentOrigin ? url.origin : null
+  } catch {
+    return null
+  }
 }
 
 async function writeStatus() {
@@ -318,7 +334,9 @@ async function initializePlayerPage() {
   if (await page.evaluate(() => Boolean((window as RemotePlayerWindow).__loadRemoteVideo))) return
   const eventBridgeExists = await page.evaluate(() => Boolean((window as RemotePlayerWindow).__remotePlaybackEvent))
 
-  await page.goto(`http://${INTERNAL_HOST}:${runtimePort}/player`, { waitUntil: 'domcontentloaded' })
+  if (!remotePlayerOrigin) throw new Error('The public application origin is unavailable for the Facebook embed.')
+  await page.goto(`${remotePlayerOrigin}/login`, { waitUntil: 'domcontentloaded' })
+  await page.setContent('<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>')
   if (!eventBridgeExists) {
     await page.exposeFunction('__remotePlaybackEvent', async (event: string, index: number, generation: number) => {
       try {
@@ -556,8 +574,10 @@ async function handleRemotePlaybackEvent(event: string, index: number, generatio
   }
 }
 
-async function startRemotePlayback(playlistIdToLoad: string) {
+async function startRemotePlayback(playlistIdToLoad: string, requestedPlayerOrigin?: string) {
   if (resumeOnStart) await stopRemotePlayback()
+  remotePlayerOrigin = getPlayerOrigin(requestedPlayerOrigin)
+  if (!remotePlayerOrigin) throw new Error('A valid HTTPS application origin is required for remote Facebook playback.')
   playbackSessionId = null
   await loadPlaylist(playlistIdToLoad)
   currentPosition = 0
@@ -596,6 +616,8 @@ async function resumePersistedPlayback() {
   const saved = await prisma.remoteRuntimeStatus.findUnique({ where: { id: STATUS_ID } })
   if (!saved?.resumeOnStart || !saved.playlistId) return
   try {
+    remotePlayerOrigin = saved.currentPage ? getPlayerOrigin(new URL(saved.currentPage).origin) : null
+    if (!remotePlayerOrigin) throw new Error('The saved application origin is unavailable for playback recovery.')
     await loadPlaylist(saved.playlistId)
     currentPosition = saved.currentPosition
     currentVideoId = saved.currentVideoId
@@ -748,12 +770,16 @@ async function stopBrowser() {
   await writeLog('INFO', 'browser_stopped', 'Chromium browser session stopped.')
 }
 
-async function executeCommand(command: RuntimeCommand, requestedPlaylistId?: string) {
+async function executeCommand(
+  command: RuntimeCommand,
+  requestedPlaylistId?: string,
+  requestedPlayerOrigin?: string,
+) {
   const operation = controlQueue.then(async () => {
     if (command === 'start') {
       if (!requestedPlaylistId) throw new Error('Pilih playlist untuk memulai remote playback.')
       try {
-        await startRemotePlayback(requestedPlaylistId)
+        await startRemotePlayback(requestedPlaylistId, requestedPlayerOrigin)
       } catch (error) {
         const message = sanitizeDiagnostic(error instanceof Error ? error.message : 'Remote playback could not be started.')
         lastError = message
@@ -902,15 +928,6 @@ class RequestBodyError extends Error {
 const server = createServer((request, response) => {
   void (async () => {
     const url = new URL(request.url ?? '/', `http://${INTERNAL_HOST}:${runtimePort}`)
-    if (request.method === 'GET' && url.pathname === '/player') {
-      response.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store',
-      })
-      response.end('<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>')
-      return
-    }
-
     if (!matchesApiToken(request.headers.authorization?.replace(/^Bearer\s+/i, ''))) {
       sendJson(response, 401, { error: 'Unauthorized.' })
       return
@@ -947,7 +964,18 @@ const server = createServer((request, response) => {
         sendJson(response, 400, { error: 'Pilih playlist untuk memulai remote playback.' })
         return
       }
-      sendJson(response, 200, await executeCommand(body.command as RuntimeCommand, playlistIdFromBody))
+      const playerOriginFromBody = 'playerOrigin' in body
+        ? getPlayerOrigin(body.playerOrigin)
+        : null
+      if (body.command === 'start' && !playerOriginFromBody) {
+        sendJson(response, 400, { error: 'A valid HTTPS application origin is required.' })
+        return
+      }
+      sendJson(response, 200, await executeCommand(
+        body.command as RuntimeCommand,
+        playlistIdFromBody,
+        playerOriginFromBody ?? undefined,
+      ))
       return
     }
 
