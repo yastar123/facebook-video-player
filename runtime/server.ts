@@ -131,51 +131,64 @@ function getPlayerOrigin(value: unknown) {
 
 async function writeStatus() {
   const updatedAt = new Date()
-  await prisma.remoteRuntimeStatus.upsert({
-    where: { id: STATUS_ID },
-    create: {
-      id: STATUS_ID,
-      processState,
-      browserState,
-      playbackStatus,
-      embedStatus,
-      chromiumVersion,
-      processStartedAt,
-      browserStartedAt,
-      lastHeartbeatAt,
-      currentPage: page?.url() ?? null,
-      lastError,
-      playlistId,
-      currentVideoId,
-      currentPosition,
-      currentTimeSeconds,
-      playbackStartedAt,
-      lastPlaybackEventAt,
-      resumeOnStart,
-      playbackSessionId,
-      updatedAt,
-    },
-    update: {
-      processState,
-      browserState,
-      playbackStatus,
-      embedStatus,
-      chromiumVersion,
-      processStartedAt,
-      browserStartedAt,
-      lastHeartbeatAt,
-      currentPage: page?.url() ?? null,
-      lastError,
-      playlistId,
-      currentVideoId,
-      currentPosition,
-      currentTimeSeconds,
-      playbackStartedAt,
-      lastPlaybackEventAt,
-      resumeOnStart,
-      playbackSessionId,
-      updatedAt,
-    },
+  await prisma.$transaction(async (transaction) => {
+    let currentVideoIdToPersist = currentVideoId
+    if (currentVideoIdToPersist) {
+      const currentVideo = await transaction.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Video" WHERE "id" = ${currentVideoIdToPersist} FOR KEY SHARE
+      `
+      if (!currentVideo.length) {
+        if (currentVideoId === currentVideoIdToPersist) currentVideoId = null
+        currentVideoIdToPersist = null
+      }
+    }
+
+    await transaction.remoteRuntimeStatus.upsert({
+      where: { id: STATUS_ID },
+      create: {
+        id: STATUS_ID,
+        processState,
+        browserState,
+        playbackStatus,
+        embedStatus,
+        chromiumVersion,
+        processStartedAt,
+        browserStartedAt,
+        lastHeartbeatAt,
+        currentPage: page?.url() ?? null,
+        lastError,
+        playlistId,
+        currentVideoId: currentVideoIdToPersist,
+        currentPosition,
+        currentTimeSeconds,
+        playbackStartedAt,
+        lastPlaybackEventAt,
+        resumeOnStart,
+        playbackSessionId,
+        updatedAt,
+      },
+      update: {
+        processState,
+        browserState,
+        playbackStatus,
+        embedStatus,
+        chromiumVersion,
+        processStartedAt,
+        browserStartedAt,
+        lastHeartbeatAt,
+        currentPage: page?.url() ?? null,
+        lastError,
+        playlistId,
+        currentVideoId: currentVideoIdToPersist,
+        currentPosition,
+        currentTimeSeconds,
+        playbackStartedAt,
+        lastPlaybackEventAt,
+        resumeOnStart,
+        playbackSessionId,
+        updatedAt,
+      },
+    })
   })
 }
 
