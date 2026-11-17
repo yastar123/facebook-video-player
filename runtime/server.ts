@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { config } from 'dotenv'
 import { PrismaPg } from '@prisma/adapter-pg'
-import { chromium, type Browser, type Page } from 'playwright'
+import { chromium, type Browser, type Page, type Route } from 'playwright'
 import { PrismaClient } from '../lib/generated/prisma/client'
 import { getNextRemotePlaybackIndex, hasRemotePlaybackProgressed } from '../lib/remote-playback-flow'
 
@@ -335,8 +335,17 @@ async function initializePlayerPage() {
   const eventBridgeExists = await page.evaluate(() => Boolean((window as RemotePlayerWindow).__remotePlaybackEvent))
 
   if (!remotePlayerOrigin) throw new Error('The public application origin is unavailable for the Facebook embed.')
-  await page.goto(`${remotePlayerOrigin}/login`, { waitUntil: 'domcontentloaded' })
-  await page.setContent('<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>')
+  const playerPageUrl = new URL('/remote-player', remotePlayerOrigin).toString()
+  const playerPageRoute = (route: Route) => route.fulfill({
+    contentType: 'text/html; charset=utf-8',
+    body: '<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>',
+  })
+  await page.route(playerPageUrl, playerPageRoute)
+  try {
+    await page.goto(playerPageUrl, { waitUntil: 'domcontentloaded' })
+  } finally {
+    await page.unroute(playerPageUrl, playerPageRoute)
+  }
   if (!eventBridgeExists) {
     await page.exposeFunction('__remotePlaybackEvent', async (event: string, index: number, generation: number) => {
       try {
