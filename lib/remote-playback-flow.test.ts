@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { getNextRemotePlaybackIndex } from './remote-playback-flow.ts'
+import { getNextRemotePlaybackIndex, hasRemotePlaybackProgressed } from './remote-playback-flow.ts'
 
 test('advances remote playback in playlist order', () => {
   assert.equal(getNextRemotePlaybackIndex(0, 3), 1)
@@ -26,4 +26,11 @@ test('rejects invalid playlist positions', () => {
   assert.equal(getNextRemotePlaybackIndex(-1, 3), null)
   assert.equal(getNextRemotePlaybackIndex(0, 0), null)
   assert.equal(getNextRemotePlaybackIndex(3, 3), null)
+})
+
+test('requires advancing position samples before confirming playback', () => {
+  assert.equal(hasRemotePlaybackProgressed(null, 1), false)
+  assert.equal(hasRemotePlaybackProgressed(1, 1.2), false)
+  assert.equal(hasRemotePlaybackProgressed(1, 1.3), true)
+  assert.equal(hasRemotePlaybackProgressed(1, Number.NaN), false)
 })

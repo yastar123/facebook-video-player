@@ -4,7 +4,7 @@ import { config } from 'dotenv'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { chromium, type Browser, type Page } from 'playwright'
 import { PrismaClient } from '../lib/generated/prisma/client'
-import { getNextRemotePlaybackIndex } from '../lib/remote-playback-flow'
+import { getNextRemotePlaybackIndex, hasRemotePlaybackProgressed } from '../lib/remote-playback-flow'
 
 config({ path: '.env.development.local' })
 config()
@@ -96,6 +96,7 @@ let resumeOnStart = false
 let playbackSessionId: string | null = null
 let loadStartedAt = 0
 let startedPlayingLogged = false
+let lastStartingPositionSeconds: number | null = null
 let finishingCurrentItem = false
 let playbackMonitorTimer: NodeJS.Timeout | null = null
 let playbackMonitorRunning = false
@@ -317,7 +318,7 @@ async function initializePlayerPage() {
   if (await page.evaluate(() => Boolean((window as RemotePlayerWindow).__loadRemoteVideo))) return
   const eventBridgeExists = await page.evaluate(() => Boolean((window as RemotePlayerWindow).__remotePlaybackEvent))
 
-  await page.setContent('<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>')
+  await page.goto(`http://${INTERNAL_HOST}:${runtimePort}/player`, { waitUntil: 'domcontentloaded' })
   if (!eventBridgeExists) {
     await page.exposeFunction('__remotePlaybackEvent', async (event: string, index: number, generation: number) => {
       try {
@@ -336,6 +337,7 @@ async function initializePlayerPage() {
     })
   }
   await page.addScriptTag({ url: 'https://connect.facebook.net/en_US/sdk.js' })
+  await writeLog('INFO', 'facebook_sdk_loaded', 'Facebook JavaScript SDK loaded in the remote browser.')
   await page.evaluate(() => {
     const remoteWindow = window as RemotePlayerWindow
     const sdk = remoteWindow.FB
@@ -379,7 +381,7 @@ async function initializePlayerPage() {
       plugin.setAttribute('data-href', url)
       plugin.setAttribute('data-width', '640')
       plugin.setAttribute('data-allowfullscreen', 'true')
-      plugin.setAttribute('data-autoplay', 'false')
+      plugin.setAttribute('data-autoplay', String(muted))
       plugin.setAttribute('data-show-text', 'false')
       container.replaceChildren(plugin)
       sdk.XFBML.parse(container)
@@ -436,6 +438,7 @@ async function loadCurrentVideo(seekSeconds = 0, isNext = false) {
   lastPlaybackEventAt = new Date()
   loadStartedAt = Date.now()
   startedPlayingLogged = false
+  lastStartingPositionSeconds = null
   finishingCurrentItem = false
   lastError = null
   currentEmbedGeneration += 1
@@ -480,6 +483,7 @@ async function handleRemotePlaybackEvent(event: string, index: number, generatio
   if (event === 'ready') {
     embedStatus = 'LOADED'
     await writeStatus()
+    await writeLog('INFO', 'facebook_embed_ready', 'Facebook initialized the embedded video player.')
     return
   }
   if (event === 'startedPlaying') {
@@ -491,6 +495,7 @@ async function handleRemotePlaybackEvent(event: string, index: number, generatio
       playbackStartedAt = new Date()
       await updatePlaybackSession('ACTIVE')
       await writePlaybackEvent('STARTED_PLAYING')
+      await writeLog('INFO', 'facebook_playback_started', 'Facebook reported that the remote video started playing.')
     }
     await writeStatus()
     return
@@ -538,6 +543,7 @@ async function handleRemotePlaybackEvent(event: string, index: number, generatio
     lastError = message
     embedStatus = 'ERROR'
     await writePlaybackEvent('ERROR')
+    await writeLog('ERROR', 'facebook_embed_error', message)
     const nextIndex = getNextRemotePlaybackIndex(currentPosition, playlistItems.length)
     if (nextIndex !== null) {
       await writeLog('WARN', 'video_skipped', `Skipping a video after the embed reported an error: ${playlistItems[currentPosition]?.title ?? 'unknown video'}.`)
@@ -815,7 +821,7 @@ async function monitorPlayback() {
       }
     }
 
-    if (page && playbackStatus === 'PLAYING') {
+    if (page && ['STARTING', 'PLAYING'].includes(playbackStatus)) {
       const observedPosition = await page.evaluate(() => {
         const player = (window as RemotePlayerWindow).__remotePlayer
         try {
@@ -825,12 +831,20 @@ async function monitorPlayback() {
         }
       })
       if (typeof observedPosition === 'number' && Number.isFinite(observedPosition) && observedPosition >= 0) {
-        currentTimeSeconds = observedPosition
+        if (playbackStatus === 'STARTING') {
+          if (hasRemotePlaybackProgressed(lastStartingPositionSeconds, observedPosition)) {
+            await handleRemotePlaybackEvent('startedPlaying', currentPosition, currentEmbedGeneration)
+          }
+          lastStartingPositionSeconds = observedPosition
+        }
+        if (playbackStatus === 'PLAYING') currentTimeSeconds = observedPosition
       }
     }
 
     if (playbackStatus === 'STARTING' && Date.now() - loadStartedAt >= 30_000) {
-      const message = 'No playback-start event was received. Facebook or Chromium may require an explicit user gesture or the embed may be unavailable.'
+      const message = embedStatus === 'LOADED'
+        ? 'Facebook initialized the embed, but the video did not start. Check whether the video is public and autoplay is allowed.'
+        : 'Facebook did not initialize the video embed. Check whether the video is public and the Facebook SDK can load it.'
       await finishPlaybackSession('ERROR', message)
       await writePlaybackEvent('ERROR')
       await writeLog('WARN', 'playback_start_not_observed', message)
@@ -887,12 +901,21 @@ class RequestBodyError extends Error {
 
 const server = createServer((request, response) => {
   void (async () => {
+    const url = new URL(request.url ?? '/', `http://${INTERNAL_HOST}:${runtimePort}`)
+    if (request.method === 'GET' && url.pathname === '/player') {
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+      })
+      response.end('<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>')
+      return
+    }
+
     if (!matchesApiToken(request.headers.authorization?.replace(/^Bearer\s+/i, ''))) {
       sendJson(response, 401, { error: 'Unauthorized.' })
       return
     }
 
-    const url = new URL(request.url ?? '/', `http://${INTERNAL_HOST}:${runtimePort}`)
     if (request.method === 'GET' && url.pathname === '/health') {
       sendJson(response, 200, await buildSnapshot())
       return

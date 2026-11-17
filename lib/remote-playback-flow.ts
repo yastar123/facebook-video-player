@@ -11,3 +11,10 @@ export function getNextRemotePlaybackIndex(
   if (nextIndex < playlistLength) return nextIndex
   return loop ? 0 : null
 }
+
+export function hasRemotePlaybackProgressed(previousPosition: number | null, currentPosition: number): boolean {
+  return previousPosition !== null
+    && Number.isFinite(previousPosition)
+    && Number.isFinite(currentPosition)
+    && currentPosition > previousPosition + 0.25
+}
