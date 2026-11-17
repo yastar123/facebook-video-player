@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { handlePlaybackFinished } from './playback-flow'
+import { handlePlaybackFinished } from './playback-flow.ts'
 
 test('replays a one-video playlist when auto-next and loop are enabled', () => {
   const calls: string[] = []

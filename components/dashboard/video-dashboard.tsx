@@ -18,6 +18,7 @@ import {
   deletePlaylistAction,
   deleteVideoAction,
   finishPlaybackAction,
+  getCompletedPlaybackCountAction,
   savePreferencesAction,
   startPlaybackAction,
   stopPlaybackAction,
@@ -40,6 +41,7 @@ const concurrentPlaybackOptions = Array.from(
   { length: MAX_CONCURRENT_VIDEOS - MIN_CONCURRENT_VIDEOS + 1 },
   (_, index) => index + MIN_CONCURRENT_VIDEOS,
 )
+const DASHBOARD_STATS_REFRESH_INTERVAL_MS = 10_000
 const activityLabels: Record<string, string> = {
   SESSION_STARTED: 'Sesi dimulai',
   VIDEO_LOADED: 'Video dimuat',
@@ -138,6 +140,35 @@ export function VideoDashboard() {
     return () => window.clearInterval(intervalId)
   }, [setActiveSessionCount])
 
+  useEffect(() => {
+    if (section !== 'dashboard') return
+
+    let syncing = false
+    const synchronizeCompletedPlaybackCount = async () => {
+      if (syncing) return
+      syncing = true
+      try {
+        const result = await getCompletedPlaybackCountAction()
+        if (!result.success) {
+          setErrorNotice(result.message)
+          return
+        }
+        setCompletedPlaybackCount(result.data)
+      } catch {
+        setErrorNotice('Jumlah video selesai tidak dapat disinkronkan.')
+      } finally {
+        syncing = false
+      }
+    }
+
+    void synchronizeCompletedPlaybackCount()
+    const intervalId = window.setInterval(
+      () => void synchronizeCompletedPlaybackCount(),
+      DASHBOARD_STATS_REFRESH_INTERVAL_MS,
+    )
+    return () => window.clearInterval(intervalId)
+  }, [section, setCompletedPlaybackCount])
+
   async function addVideo(form: FormData) {
     const url = String(form.get('url') ?? '').trim()
     const titleValue = String(form.get('title') ?? '').trim()
@@ -196,13 +227,22 @@ export function VideoDashboard() {
     }
   }
   async function removePlaylist(id: string) {
+    const playlist = playlists.find((item) => item.id === id)
+    if (!playlist) return
+    if (!window.confirm(`Hapus daftar putar "${playlist.name}" beserta semua sesi dan riwayat pemutarannya?`)) return
+
     try {
       const result = await deletePlaylistAction(id)
       if (!result.success) { setErrorNotice(result.message); return }
       const remaining = playlists.filter((item) => item.id !== id)
       setPlaylists(remaining)
-      if (selectedPlaylist === id) setSelectedPlaylist(remaining[0]?.id ?? '')
-      setNotice('Daftar putar berhasil dihapus.')
+      setActiveSessionCount((count) => Math.max(0, count - result.data))
+      if (selectedPlaylist === id) {
+        setSelectedPlaylist(remaining[0]?.id ?? '')
+        setCurrentIndex(0)
+        setMultiVideoIds(null)
+      }
+      setNotice('Daftar putar beserta riwayat pemutarannya berhasil dihapus.')
       setErrorNotice('')
     } catch {
       setErrorNotice('Daftar putar tidak dapat dihapus. Coba lagi.')
@@ -408,7 +448,12 @@ type PlayerPageProps = {
 function PlayerPage(props: PlayerPageProps) {
   return <>
     {props.multiView ? <MultiPlayerPage {...props} /> : <SinglePlayerPage {...props} />}
-    <RuntimeMonitor />
+    <RuntimeMonitor
+      playlists={props.playlists}
+      activePlaylistId={props.activePlaylist?.id ?? ''}
+      autoPlayNext={props.preferences.autoPlayNext}
+      loopEnabled={props.preferences.loop}
+    />
   </>
 }
 

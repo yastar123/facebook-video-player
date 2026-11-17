@@ -47,6 +47,23 @@ enum RemoteBrowserState {
   CRASHED
 }
 
+enum RemotePlaybackStatus {
+  IDLE
+  STARTING
+  PLAYING
+  PAUSED
+  COMPLETED
+  STOPPED
+  ERROR
+}
+
+enum RemoteEmbedStatus {
+  NOT_LOADED
+  LOADING
+  LOADED
+  ERROR
+}
+
 model User {
   id            String    @id
   name          String
@@ -77,18 +94,18 @@ model Session {
 model Account {
   id                    String    @id
   accountId             String
-  providerId             String
-  userId                 String
-  accessToken            String?
-  refreshToken           String?
-  idToken                String?
-  accessTokenExpiresAt   DateTime?
-  refreshTokenExpiresAt  DateTime?
-  scope                  String?
-  password               String?
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
-  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([providerId, accountId])
   @@index([userId])
@@ -114,31 +131,33 @@ model LoginAttempt {
 }
 
 model Video {
-  id              String               @id @default(cuid())
+  id              String                @id @default(cuid())
   title           String
   facebookUrl     String
   facebookVideoId String?
   thumbnailUrl    String?
-  embedStatus     EmbedStatus          @default(UNVERIFIED)
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  embedStatus     EmbedStatus           @default(UNVERIFIED)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
   playlistItems   PlaylistVideo[]
   playbackLogs    PlaybackLog[]
   currentIn       PlaybackSession[]
+  runtimeStatuses RemoteRuntimeStatus[]
 
   @@index([createdAt])
   @@index([embedStatus])
 }
 
 model Playlist {
-  id          String            @id @default(cuid())
-  name        String
-  description String?
-  isActive    Boolean           @default(false)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-  videos      PlaylistVideo[]
-  sessions    PlaybackSession[]
+  id              String                @id @default(cuid())
+  name            String
+  description     String?
+  isActive        Boolean               @default(false)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  videos          PlaylistVideo[]
+  sessions        PlaybackSession[]
+  runtimeStatuses RemoteRuntimeStatus[]
 
   @@index([createdAt])
   @@index([isActive])
@@ -150,8 +169,8 @@ model PlaylistVideo {
   videoId    String
   position   Int
   createdAt  DateTime @default(now())
-  playlist  Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
-  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
 
   @@unique([playlistId, videoId])
   @@unique([playlistId, position])
@@ -159,17 +178,18 @@ model PlaylistVideo {
 }
 
 model PlaybackSession {
-  id            String                @id @default(cuid())
-  playlistId    String
-  currentVideoId String?
-  status        PlaybackSessionStatus @default(ACTIVE)
-  startedAt     DateTime              @default(now())
-  lastHeartbeatAt DateTime            @default(now())
-  endedAt       DateTime?
-  createdAt     DateTime              @default(now())
-  playlist      Playlist              @relation(fields: [playlistId], references: [id], onDelete: Restrict)
-  currentVideo  Video?                @relation(fields: [currentVideoId], references: [id], onDelete: SetNull)
-  logs          PlaybackLog[]
+  id              String                @id @default(cuid())
+  playlistId      String
+  currentVideoId  String?
+  status          PlaybackSessionStatus @default(ACTIVE)
+  startedAt       DateTime              @default(now())
+  lastHeartbeatAt DateTime              @default(now())
+  endedAt         DateTime?
+  createdAt       DateTime              @default(now())
+  playlist        Playlist              @relation(fields: [playlistId], references: [id], onDelete: Restrict)
+  currentVideo    Video?                @relation(fields: [currentVideoId], references: [id], onDelete: SetNull)
+  logs            PlaybackLog[]
+  runtimeStatus   RemoteRuntimeStatus?
 
   @@index([playlistId, startedAt])
   @@index([status])
@@ -192,33 +212,49 @@ model PlaybackLog {
 }
 
 model AppSettings {
-  id              String   @id @default("global")
-  autoPlayNext    Boolean  @default(false)
-  loopPlaylist    Boolean  @default(false)
-  shufflePlaylist Boolean  @default(false)
-  autoplay        Boolean  @default(false)
-  muted           Boolean  @default(true)
-  maxConcurrent   Int      @default(20)
-  endBehavior     String   @default("STOP")
-  appName         String   @default("Facebook Video Player")
-  timezone        String   @default("UTC")
-  dateFormat      String   @default("YYYY-MM-DD")
-  logRetentionDays Int     @default(90)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id               String   @id @default("global")
+  autoPlayNext     Boolean  @default(false)
+  loopPlaylist     Boolean  @default(false)
+  shufflePlaylist  Boolean  @default(false)
+  autoplay         Boolean  @default(false)
+  muted            Boolean  @default(true)
+  maxConcurrent    Int      @default(20)
+  endBehavior      String   @default("STOP")
+  appName          String   @default("Facebook Video Player")
+  timezone         String   @default("UTC")
+  dateFormat       String   @default("YYYY-MM-DD")
+  logRetentionDays Int      @default(90)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
 model RemoteRuntimeStatus {
-  id                 String              @id @default("primary")
-  processState       RuntimeProcessState @default(OFFLINE)
-  browserState       RemoteBrowserState  @default(CLOSED)
-  chromiumVersion    String?
-  processStartedAt   DateTime?
-  browserStartedAt   DateTime?
-  lastHeartbeatAt    DateTime?
-  currentPage        String?
-  lastError          String?
-  updatedAt          DateTime            @updatedAt
+  id                  String               @id @default("primary")
+  processState        RuntimeProcessState  @default(OFFLINE)
+  browserState        RemoteBrowserState   @default(CLOSED)
+  playbackStatus      RemotePlaybackStatus @default(IDLE)
+  embedStatus         RemoteEmbedStatus    @default(NOT_LOADED)
+  chromiumVersion     String?
+  processStartedAt    DateTime?
+  browserStartedAt    DateTime?
+  lastHeartbeatAt     DateTime?
+  currentPage         String?
+  lastError           String?
+  playlistId          String?
+  currentVideoId      String?
+  currentPosition     Int                  @default(0)
+  currentTimeSeconds  Float                @default(0)
+  playbackStartedAt   DateTime?
+  lastPlaybackEventAt DateTime?
+  resumeOnStart       Boolean              @default(false)
+  playbackSessionId   String?              @unique
+  playlist            Playlist?            @relation(fields: [playlistId], references: [id], onDelete: SetNull)
+  currentVideo        Video?               @relation(fields: [currentVideoId], references: [id], onDelete: SetNull)
+  playbackSession     PlaybackSession?     @relation(fields: [playbackSessionId], references: [id], onDelete: SetNull)
+  updatedAt           DateTime             @updatedAt
+
+  @@index([playlistId])
+  @@index([currentVideoId])
 }
 
 model RemoteRuntimeLog {

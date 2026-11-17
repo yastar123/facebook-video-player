@@ -1,5 +1,7 @@
 export type RuntimeProcessState = 'STARTING' | 'ONLINE' | 'STOPPING' | 'OFFLINE' | 'ERROR'
 export type RemoteBrowserState = 'CLOSED' | 'STARTING' | 'OPEN' | 'CRASHED' | 'UNKNOWN'
+export type RemotePlaybackStatus = 'IDLE' | 'STARTING' | 'PLAYING' | 'PAUSED' | 'COMPLETED' | 'STOPPED' | 'ERROR' | 'UNKNOWN'
+export type RemoteEmbedStatus = 'NOT_LOADED' | 'LOADING' | 'LOADED' | 'ERROR' | 'UNKNOWN'
 export type RuntimeCommand = 'start' | 'stop' | 'restart'
 
 export type RuntimeLogEntry = {
@@ -21,8 +23,15 @@ export type RemoteRuntimeSnapshot = {
   browserStartedAt: string | null
   lastHeartbeatAt: string | null
   currentPage: string | null
-  embedStatus: 'NOT_LOADED'
-  playbackStatus: 'NOT_OBSERVED'
+  embedStatus: RemoteEmbedStatus
+  playbackStatus: RemotePlaybackStatus
+  currentPlaylistName: string | null
+  currentContentTitle: string | null
+  currentPosition: number
+  playlistLength: number
+  currentTimeSeconds: number
+  playbackStartedAt: string | null
+  lastPlaybackEventAt: string | null
   lastError: string | null
   logs: RuntimeLogEntry[]
 }

@@ -94,16 +94,32 @@ export async function createPlaylistAction(input: { name: string; description: s
   }
 }
 
-export async function deletePlaylistAction(id: string): Promise<ActionResult<null>> {
+export async function deletePlaylistAction(id: string): Promise<ActionResult<number>> {
   await requireAdmin()
   if (!idSchema.safeParse(id).success) return { success: false, message: 'Daftar putar tidak valid.' }
 
-  const sessionCount = await prisma.playbackSession.count({ where: { playlistId: id } })
-  if (sessionCount > 0) {
-    return { success: false, message: 'Daftar putar memiliki riwayat pemutaran dan tidak dapat dihapus.' }
-  }
-  await prisma.playlist.delete({ where: { id } })
-  return { success: true, data: null }
+  const activeSessionSince = new Date(Date.now() - PLAYBACK_SESSION_ACTIVE_WINDOW_MS)
+  const activeSessionCount = await prisma.$transaction(async (transaction) => {
+    const playlist = await transaction.playlist.findUnique({
+      where: { id },
+      select: { id: true },
+    })
+    if (!playlist) return null
+
+    const activeCount = await transaction.playbackSession.count({
+      where: {
+        playlistId: id,
+        status: 'ACTIVE',
+        lastHeartbeatAt: { gte: activeSessionSince },
+      },
+    })
+    await transaction.playbackSession.deleteMany({ where: { playlistId: id } })
+    await transaction.playlist.delete({ where: { id } })
+    return activeCount
+  })
+
+  if (activeSessionCount === null) return { success: false, message: 'Daftar putar tidak ditemukan.' }
+  return { success: true, data: activeSessionCount }
 }
 
 export async function togglePlaylistVideoAction(
@@ -287,6 +303,14 @@ export async function syncPlaybackSessionsAction(sessionId: string | null): Prom
   })
 
   return { success: true, data: activeSessionCount }
+}
+
+export async function getCompletedPlaybackCountAction(): Promise<ActionResult<number>> {
+  await requireAdmin()
+  const completedPlaybackCount = await prisma.playbackLog.count({
+    where: { eventType: 'FINISHED_PLAYING' },
+  })
+  return { success: true, data: completedPlaybackCount }
 }
 
 export async function finishPlaybackAction(sessionId: string, videoId: string): Promise<ActionResult<PlaybackActivity | null>> {

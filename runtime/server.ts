@@ -4,6 +4,7 @@ import { config } from 'dotenv'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { chromium, type Browser, type Page } from 'playwright'
 import { PrismaClient } from '../lib/generated/prisma/client'
+import { getNextRemotePlaybackIndex } from '../lib/remote-playback-flow'
 
 config({ path: '.env.development.local' })
 config()
@@ -16,7 +17,37 @@ const MAX_RECOVERY_ATTEMPTS = 3
 
 type RuntimeProcessState = 'STARTING' | 'ONLINE' | 'STOPPING' | 'OFFLINE' | 'ERROR'
 type RemoteBrowserState = 'CLOSED' | 'STARTING' | 'OPEN' | 'CRASHED'
+type RemotePlaybackStatus = 'IDLE' | 'STARTING' | 'PLAYING' | 'PAUSED' | 'COMPLETED' | 'STOPPED' | 'ERROR'
+type RemoteEmbedStatus = 'NOT_LOADED' | 'LOADING' | 'LOADED' | 'ERROR'
 type RuntimeCommand = 'start' | 'stop' | 'restart'
+type PlaybackEventType = 'SESSION_STARTED' | 'VIDEO_LOADED' | 'STARTED_PLAYING' | 'PAUSED' | 'FINISHED_PLAYING' | 'NEXT_VIDEO_LOADED' | 'SESSION_STOPPED' | 'ERROR'
+type RemotePlaylistItem = { id: string; title: string; url: string }
+type FacebookVideoPlayer = {
+  play: () => void
+  mute: () => void
+  seek: (seconds: number) => void
+  getCurrentPosition: () => number
+  subscribe: (
+    event: 'startedPlaying' | 'paused' | 'finishedPlaying' | 'error',
+    callback: () => void,
+  ) => { release?: (event: string) => void } | void
+}
+
+type FacebookSdk = {
+  init: (options: { xfbml: boolean; version: string }) => void
+  XFBML: { parse: (element?: HTMLElement) => void }
+  Event: {
+    subscribe: (event: 'xfbml.ready', callback: (message: { type: string; id: string; instance: FacebookVideoPlayer }) => void) => void
+    unsubscribe?: (event: 'xfbml.ready', callback: (message: { type: string; id: string; instance: FacebookVideoPlayer }) => void) => void
+  }
+}
+
+type RemotePlayerWindow = Omit<Window, 'FB'> & {
+  FB?: FacebookSdk
+  __remotePlaybackEvent?: (event: string, index: number, generation: number) => Promise<void>
+  __remotePlayer?: FacebookVideoPlayer
+  __loadRemoteVideo?: (url: string, index: number, generation: number, seekSeconds: number, muted: boolean) => void
+}
 
 const connectionString = process.env.DATABASE_URL
 if (!connectionString) throw new Error('DATABASE_URL is required for the remote browser runtime.')
@@ -51,6 +82,27 @@ let heartbeatTimer: NodeJS.Timeout | null = null
 let shuttingDown = false
 let browserLaunchPromise: Promise<void> | null = null
 let controlQueue: Promise<void> = Promise.resolve()
+let playbackStatus: RemotePlaybackStatus = 'IDLE'
+let embedStatus: RemoteEmbedStatus = 'NOT_LOADED'
+let playlistId: string | null = null
+let playlistItems: RemotePlaylistItem[] = []
+let currentVideoId: string | null = null
+let currentPosition = 0
+let currentEmbedGeneration = 0
+let currentTimeSeconds = 0
+let playbackStartedAt: Date | null = null
+let lastPlaybackEventAt: Date | null = null
+let resumeOnStart = false
+let playbackSessionId: string | null = null
+let loadStartedAt = 0
+let startedPlayingLogged = false
+let finishingCurrentItem = false
+let playbackMonitorTimer: NodeJS.Timeout | null = null
+let playbackMonitorRunning = false
+let lastPlaylistCheckAt = 0
+let autoPlayNext = true
+let loopPlaylist = false
+let mutedPlayback = true
 
 function sanitizeDiagnostic(value: string) {
   return value
@@ -68,23 +120,43 @@ async function writeStatus() {
       id: STATUS_ID,
       processState,
       browserState,
+      playbackStatus,
+      embedStatus,
       chromiumVersion,
       processStartedAt,
       browserStartedAt,
       lastHeartbeatAt,
       currentPage: page?.url() ?? null,
       lastError,
+      playlistId,
+      currentVideoId,
+      currentPosition,
+      currentTimeSeconds,
+      playbackStartedAt,
+      lastPlaybackEventAt,
+      resumeOnStart,
+      playbackSessionId,
       updatedAt,
     },
     update: {
       processState,
       browserState,
+      playbackStatus,
+      embedStatus,
       chromiumVersion,
       processStartedAt,
       browserStartedAt,
       lastHeartbeatAt,
       currentPage: page?.url() ?? null,
       lastError,
+      playlistId,
+      currentVideoId,
+      currentPosition,
+      currentTimeSeconds,
+      playbackStartedAt,
+      lastPlaybackEventAt,
+      resumeOnStart,
+      playbackSessionId,
       updatedAt,
     },
   })
@@ -106,11 +178,20 @@ async function writeLog(level: 'INFO' | 'WARN' | 'ERROR', event: string, message
 
 async function buildSnapshot() {
   await writeStatus()
-  const logs = await prisma.remoteRuntimeLog.findMany({
-    take: 10,
-    orderBy: { createdAt: 'desc' },
-    select: { id: true, level: true, event: true, message: true, createdAt: true },
-  })
+  const [status, logs] = await Promise.all([
+    prisma.remoteRuntimeStatus.findUnique({
+      where: { id: STATUS_ID },
+      include: {
+        playlist: { select: { name: true, videos: { select: { id: true } } } },
+        currentVideo: { select: { title: true } },
+      },
+    }),
+    prisma.remoteRuntimeLog.findMany({
+      take: 10,
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, level: true, event: true, message: true, createdAt: true },
+    }),
+  ])
 
   return {
     serviceConnected: true,
@@ -123,8 +204,15 @@ async function buildSnapshot() {
     browserStartedAt: browserStartedAt?.toISOString() ?? null,
     lastHeartbeatAt: lastHeartbeatAt?.toISOString() ?? null,
     currentPage: page?.url() ?? null,
-    embedStatus: 'NOT_LOADED',
-    playbackStatus: 'NOT_OBSERVED',
+    embedStatus,
+    playbackStatus,
+    currentPlaylistName: status?.playlist?.name ?? null,
+    currentContentTitle: status?.currentVideo?.title ?? null,
+    currentPosition: status ? status.currentPosition + 1 : 0,
+    playlistLength: status?.playlist?.videos.length ?? 0,
+    currentTimeSeconds,
+    playbackStartedAt: playbackStartedAt?.toISOString() ?? null,
+    lastPlaybackEventAt: lastPlaybackEventAt?.toISOString() ?? null,
     lastError,
     logs: logs.map((log) => ({
       ...log,
@@ -140,6 +228,13 @@ async function scheduleRecovery() {
     recoveryAttempts = 0
   }
   if (recoveryAttempts >= MAX_RECOVERY_ATTEMPTS || shuttingDown) {
+    if (resumeOnStart && !shuttingDown) {
+      lastError = 'Chromium recovery limit reached; restart playback from the dashboard.'
+      playbackStatus = 'ERROR'
+      embedStatus = 'ERROR'
+      await updatePlaybackSession('ERROR', new Date())
+      await writeStatus()
+    }
     await writeLog('ERROR', 'browser_recovery_exhausted', 'Chromium recovery limit reached; restart it from the dashboard.')
     return
   }
@@ -148,7 +243,12 @@ async function scheduleRecovery() {
   const delay = Math.min(30_000, 1_000 * (2 ** (recoveryAttempts - 1)))
   recoveryTimer = setTimeout(() => {
     recoveryTimer = null
-    void startBrowser(true).catch(async (error: unknown) => {
+    void startBrowser(true).then(async () => {
+      if (resumeOnStart) {
+        await initializePlayerPage()
+        await loadCurrentVideo(currentTimeSeconds)
+      }
+    }).catch(async (error: unknown) => {
       lastError = sanitizeDiagnostic(error instanceof Error ? error.message : 'Chromium recovery failed.')
       browserState = 'CRASHED'
       await writeStatus()
@@ -165,9 +265,366 @@ async function handleBrowserDisconnect(disconnectedBrowser: Browser) {
   page = null
   browserState = 'CRASHED'
   lastError = 'Chromium exited unexpectedly.'
+  if (resumeOnStart) {
+    playbackStatus = 'STARTING'
+    embedStatus = 'LOADING'
+    loadStartedAt = Date.now()
+  }
   await writeStatus()
   await writeLog('ERROR', 'browser_crashed', lastError)
   await scheduleRecovery()
+}
+
+function getAllowedFacebookUrl(value: string) {
+  try {
+    const url = new URL(value)
+    const allowedHosts = new Set(['facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.watch'])
+    return url.protocol === 'https:' && allowedHosts.has(url.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+async function writePlaybackEvent(eventType: PlaybackEventType) {
+  if (!playbackSessionId) return
+  await prisma.playbackLog.create({
+    data: {
+      sessionId: playbackSessionId,
+      videoId: currentVideoId,
+      eventType,
+    },
+  })
+}
+
+async function updatePlaybackSession(
+  status: 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'STOPPED' | 'ERROR',
+  endedAt: Date | null = null,
+) {
+  if (!playbackSessionId) return
+  await prisma.playbackSession.updateMany({
+    where: { id: playbackSessionId },
+    data: {
+      status,
+      currentVideoId,
+      lastHeartbeatAt: new Date(),
+      endedAt,
+    },
+  })
+}
+
+async function initializePlayerPage() {
+  if (!page) throw new Error('Chromium page is not available.')
+  if (await page.evaluate(() => Boolean((window as RemotePlayerWindow).__loadRemoteVideo))) return
+  const eventBridgeExists = await page.evaluate(() => Boolean((window as RemotePlayerWindow).__remotePlaybackEvent))
+
+  await page.setContent('<!doctype html><html><head><meta charset="utf-8"><title>Remote Video Player</title></head><body><div id="fb-root"></div><main id="remote-player"></main></body></html>')
+  if (!eventBridgeExists) {
+    await page.exposeFunction('__remotePlaybackEvent', async (event: string, index: number, generation: number) => {
+      try {
+        await handleRemotePlaybackEvent(event, index, generation)
+      } catch (error) {
+        const message = sanitizeDiagnostic(error instanceof Error ? error.message : 'Playback event could not be recorded.')
+        lastError = message
+        console.error('Remote playback event failed:', message)
+        try {
+          await writeStatus()
+          await writeLog('ERROR', 'playback_event_failed', message)
+        } catch (cause) {
+          console.error('Could not persist playback event failure:', sanitizeDiagnostic(cause instanceof Error ? cause.message : 'Database write failed.'))
+        }
+      }
+    })
+  }
+  await page.addScriptTag({ url: 'https://connect.facebook.net/en_US/sdk.js' })
+  await page.evaluate(() => {
+    const remoteWindow = window as RemotePlayerWindow
+    const sdk = remoteWindow.FB
+    if (!sdk) throw new Error('Facebook JavaScript SDK was not initialized.')
+    sdk.init({ xfbml: false, version: 'v3.2' })
+    sdk.Event.subscribe('xfbml.ready', (message) => {
+      if (message.type !== 'video') return
+      const match = /^remote-facebook-video-(\d+)-(\d+)$/.exec(message.id)
+      if (!match) return
+
+      const index = Number(match[1])
+      const generation = Number(match[2])
+      const player = message.instance
+      remoteWindow.__remotePlayer = player
+      player.subscribe('startedPlaying', () => { void remoteWindow.__remotePlaybackEvent?.('startedPlaying', index, generation) })
+      player.subscribe('paused', () => { void remoteWindow.__remotePlaybackEvent?.('paused', index, generation) })
+      player.subscribe('finishedPlaying', () => { void remoteWindow.__remotePlaybackEvent?.('finishedPlaying', index, generation) })
+      player.subscribe('error', () => { void remoteWindow.__remotePlaybackEvent?.('error', index, generation) })
+
+      const config = (window as Window & { __remotePlayerConfig?: { index: number; generation: number; seekSeconds: number; muted: boolean } }).__remotePlayerConfig
+      if (!config || config.index !== index || config.generation !== generation) return
+      void remoteWindow.__remotePlaybackEvent?.('ready', index, generation)
+      if (config.muted) player.mute()
+      if (config.seekSeconds > 0) player.seek(config.seekSeconds)
+      player.play()
+    })
+
+    remoteWindow.__loadRemoteVideo = (url, index, generation, seekSeconds, muted) => {
+      const container = document.getElementById('remote-player')
+      if (!container) throw new Error('Remote player container is missing.')
+      remoteWindow.__remotePlayer = undefined
+      ;(window as Window & { __remotePlayerConfig?: { index: number; generation: number; seekSeconds: number; muted: boolean } }).__remotePlayerConfig = {
+        index,
+        generation,
+        seekSeconds,
+        muted,
+      }
+      const plugin = document.createElement('div')
+      plugin.id = `remote-facebook-video-${index}-${generation}`
+      plugin.className = 'fb-video'
+      plugin.setAttribute('data-href', url)
+      plugin.setAttribute('data-width', '640')
+      plugin.setAttribute('data-allowfullscreen', 'true')
+      plugin.setAttribute('data-autoplay', 'false')
+      plugin.setAttribute('data-show-text', 'false')
+      container.replaceChildren(plugin)
+      sdk.XFBML.parse(container)
+    }
+  })
+}
+
+async function loadPlaylist(playlistIdToLoad: string) {
+  const [playlist, settings] = await Promise.all([
+    prisma.playlist.findUnique({
+      where: { id: playlistIdToLoad },
+      include: {
+        videos: {
+          orderBy: { position: 'asc' },
+          include: { video: { select: { id: true, title: true, facebookUrl: true } } },
+        },
+      },
+    }),
+    prisma.appSettings.findUnique({
+      where: { id: 'global' },
+      select: { autoPlayNext: true, loopPlaylist: true, muted: true },
+    }),
+  ])
+  if (!playlist) throw new Error('Playlist tidak ditemukan.')
+
+  const items = playlist.videos.map(({ video }) => ({
+    id: video.id,
+    title: video.title,
+    url: video.facebookUrl,
+  }))
+  if (!items.length) throw new Error('Playlist tidak memiliki video.')
+  if (items.some((item) => !getAllowedFacebookUrl(item.url))) {
+    throw new Error('Playlist berisi URL video yang bukan HTTPS Facebook yang didukung.')
+  }
+
+  playlistId = playlist.id
+  playlistItems = items
+  lastPlaylistCheckAt = Date.now()
+  autoPlayNext = settings?.autoPlayNext ?? true
+  loopPlaylist = settings?.loopPlaylist ?? false
+  mutedPlayback = settings?.muted ?? true
+}
+
+async function loadCurrentVideo(seekSeconds = 0, isNext = false) {
+  if (!page || currentPosition < 0 || currentPosition >= playlistItems.length) {
+    throw new Error('Posisi video runtime tidak valid.')
+  }
+  const item = playlistItems[currentPosition]
+  currentVideoId = item.id
+  currentTimeSeconds = Math.max(0, seekSeconds)
+  playbackStatus = 'STARTING'
+  embedStatus = 'LOADING'
+  playbackStartedAt = null
+  lastPlaybackEventAt = new Date()
+  loadStartedAt = Date.now()
+  startedPlayingLogged = false
+  finishingCurrentItem = false
+  lastError = null
+  currentEmbedGeneration += 1
+
+  await updatePlaybackSession('ACTIVE')
+  if (isNext) await writePlaybackEvent('NEXT_VIDEO_LOADED')
+  await writePlaybackEvent('VIDEO_LOADED')
+  await writeStatus()
+
+  const loaded = await page.evaluate(({ url, index, generation, seek, muted }) => {
+    const load = (window as RemotePlayerWindow).__loadRemoteVideo
+    if (!load) return false
+    load(url, index, generation, seek, muted)
+    return true
+  }, {
+    url: item.url,
+    index: currentPosition,
+    generation: currentEmbedGeneration,
+    seek: currentTimeSeconds,
+    muted: mutedPlayback,
+  })
+  if (!loaded) throw new Error('Facebook player bridge is unavailable.')
+}
+
+async function finishPlaybackSession(
+  status: 'COMPLETED' | 'STOPPED' | 'ERROR',
+  message?: string,
+) {
+  resumeOnStart = false
+  playbackStatus = status
+  embedStatus = status === 'ERROR' ? 'ERROR' : embedStatus
+  lastPlaybackEventAt = new Date()
+  if (message) lastError = sanitizeDiagnostic(message)
+  await updatePlaybackSession(status, new Date())
+  await writeStatus()
+}
+
+async function handleRemotePlaybackEvent(event: string, index: number, generation: number) {
+  if (index !== currentPosition || generation !== currentEmbedGeneration || !resumeOnStart || !playbackSessionId) return
+  lastPlaybackEventAt = new Date()
+
+  if (event === 'ready') {
+    embedStatus = 'LOADED'
+    await writeStatus()
+    return
+  }
+  if (event === 'startedPlaying') {
+    playbackStatus = 'PLAYING'
+    embedStatus = 'LOADED'
+    lastError = null
+    if (!startedPlayingLogged) {
+      startedPlayingLogged = true
+      playbackStartedAt = new Date()
+      await updatePlaybackSession('ACTIVE')
+      await writePlaybackEvent('STARTED_PLAYING')
+    }
+    await writeStatus()
+    return
+  }
+  if (event === 'paused') {
+    playbackStatus = 'PAUSED'
+    await updatePlaybackSession('PAUSED')
+    await writePlaybackEvent('PAUSED')
+    await writeStatus()
+    return
+  }
+
+  if (finishingCurrentItem) return
+  if (event === 'finishedPlaying') {
+    finishingCurrentItem = true
+    currentTimeSeconds = 0
+    await writePlaybackEvent('FINISHED_PLAYING')
+    const settings = await prisma.appSettings.findUnique({
+      where: { id: 'global' },
+      select: { autoPlayNext: true, loopPlaylist: true },
+    })
+    autoPlayNext = settings?.autoPlayNext ?? autoPlayNext
+    loopPlaylist = settings?.loopPlaylist ?? loopPlaylist
+    const previousPosition = currentPosition
+    const nextIndex = getNextRemotePlaybackIndex(
+      currentPosition,
+      playlistItems.length,
+      autoPlayNext,
+      loopPlaylist,
+    )
+    if (nextIndex !== null) {
+      currentPosition = nextIndex
+      await loadCurrentVideo(0, nextIndex !== previousPosition)
+      return
+    }
+
+    await finishPlaybackSession('COMPLETED')
+    await stopBrowser()
+    return
+  }
+
+  if (event === 'error') {
+    finishingCurrentItem = true
+    const message = 'Facebook embed reported a playback error.'
+    lastError = message
+    embedStatus = 'ERROR'
+    await writePlaybackEvent('ERROR')
+    const nextIndex = getNextRemotePlaybackIndex(currentPosition, playlistItems.length)
+    if (nextIndex !== null) {
+      await writeLog('WARN', 'video_skipped', `Skipping a video after the embed reported an error: ${playlistItems[currentPosition]?.title ?? 'unknown video'}.`)
+      currentPosition = nextIndex
+      await loadCurrentVideo(0, true)
+      return
+    }
+    await finishPlaybackSession('ERROR', message)
+    await stopBrowser()
+  }
+}
+
+async function startRemotePlayback(playlistIdToLoad: string) {
+  if (resumeOnStart) await stopRemotePlayback()
+  playbackSessionId = null
+  await loadPlaylist(playlistIdToLoad)
+  currentPosition = 0
+  currentVideoId = playlistItems[0].id
+  currentTimeSeconds = 0
+  playbackStartedAt = null
+  playbackSessionId = null
+  playbackStatus = 'STARTING'
+  embedStatus = 'LOADING'
+  resumeOnStart = true
+  const session = await prisma.playbackSession.create({
+    data: { playlistId: playlistIdToLoad, currentVideoId, status: 'ACTIVE' },
+  })
+  playbackSessionId = session.id
+  await writePlaybackEvent('SESSION_STARTED')
+  await writeStatus()
+
+  if (!browser?.isConnected()) await startBrowser()
+  await initializePlayerPage()
+  await loadCurrentVideo()
+}
+
+async function stopRemotePlayback() {
+  if (playbackSessionId && resumeOnStart) {
+    await writePlaybackEvent('SESSION_STOPPED')
+    await finishPlaybackSession('STOPPED')
+  } else {
+    resumeOnStart = false
+    if (playbackStatus !== 'COMPLETED') playbackStatus = 'STOPPED'
+    await writeStatus()
+  }
+  await stopBrowser()
+}
+
+async function resumePersistedPlayback() {
+  const saved = await prisma.remoteRuntimeStatus.findUnique({ where: { id: STATUS_ID } })
+  if (!saved?.resumeOnStart || !saved.playlistId) return
+  try {
+    await loadPlaylist(saved.playlistId)
+    currentPosition = saved.currentPosition
+    currentVideoId = saved.currentVideoId
+    currentTimeSeconds = saved.currentTimeSeconds
+    playbackSessionId = saved.playbackSessionId
+    playbackStartedAt = saved.playbackStartedAt
+    resumeOnStart = currentPosition >= 0 && currentPosition < playlistItems.length
+      && playlistItems[currentPosition]?.id === currentVideoId
+    if (!resumeOnStart) throw new Error('Persisted playlist position is no longer valid.')
+
+    const session = playbackSessionId
+      ? await prisma.playbackSession.findUnique({ where: { id: playbackSessionId }, select: { status: true } })
+      : null
+    if (!session || !['ACTIVE', 'PAUSED'].includes(session.status)) {
+      const created = await prisma.playbackSession.create({
+        data: { playlistId: saved.playlistId, currentVideoId, status: 'ACTIVE' },
+      })
+      playbackSessionId = created.id
+      await writePlaybackEvent('SESSION_STARTED')
+    }
+    playbackStatus = 'STARTING'
+    embedStatus = 'LOADING'
+    await writeLog('INFO', 'playback_recovery_started', 'Resuming the saved playlist position after runtime restart.')
+    await startBrowser(true)
+    await initializePlayerPage()
+    await loadCurrentVideo(currentTimeSeconds)
+  } catch (error) {
+    const message = sanitizeDiagnostic(error instanceof Error ? error.message : 'Playback recovery failed.')
+    lastError = message
+    resumeOnStart = false
+    playbackStatus = 'ERROR'
+    embedStatus = 'ERROR'
+    await writeStatus()
+    await writeLog('ERROR', 'playback_recovery_failed', message)
+  }
 }
 
 async function launchBrowser(isRecovery: boolean) {
@@ -183,7 +640,7 @@ async function launchBrowser(isRecovery: boolean) {
   lastError = null
   await writeStatus()
   const startEvent = isRecovery ? 'browser_recovery_started' : 'browser_start_requested'
-  await writeLog('INFO', startEvent, 'Launching a blank, non-playing Chromium page.')
+  await writeLog('INFO', startEvent, 'Launching Chromium for the configured runtime playlist.')
 
   if (process.platform !== 'win32' && typeof process.getuid === 'function' && process.getuid() === 0) {
     browserState = 'CRASHED'
@@ -224,7 +681,7 @@ async function launchBrowser(isRecovery: boolean) {
     browserStartedAt = new Date()
     browserState = 'OPEN'
     await writeStatus()
-    await writeLog('INFO', 'browser_started', `Chromium ${chromiumVersion} is open on a blank page; Facebook playback is not started by this service.`)
+    await writeLog('INFO', 'browser_started', `Chromium ${chromiumVersion} is ready for the configured runtime playlist.`)
   } catch (error) {
     intentionallyClosingBrowsers.add(launchedBrowser)
     try {
@@ -285,18 +742,109 @@ async function stopBrowser() {
   await writeLog('INFO', 'browser_stopped', 'Chromium browser session stopped.')
 }
 
-async function executeCommand(command: RuntimeCommand) {
+async function executeCommand(command: RuntimeCommand, requestedPlaylistId?: string) {
   const operation = controlQueue.then(async () => {
-    if (command === 'start') await startBrowser()
-    else if (command === 'stop') await stopBrowser()
+    if (command === 'start') {
+      if (!requestedPlaylistId) throw new Error('Pilih playlist untuk memulai remote playback.')
+      try {
+        await startRemotePlayback(requestedPlaylistId)
+      } catch (error) {
+        const message = sanitizeDiagnostic(error instanceof Error ? error.message : 'Remote playback could not be started.')
+        lastError = message
+        await finishPlaybackSession('ERROR', message)
+        await writeLog('ERROR', 'playback_start_failed', message)
+        throw error
+      }
+    } else if (command === 'stop') await stopRemotePlayback()
     else {
+      const shouldResume = resumeOnStart
       await stopBrowser()
-      await startBrowser()
+      if (shouldResume) {
+        await startBrowser()
+        await initializePlayerPage()
+        await loadCurrentVideo(currentTimeSeconds)
+      } else {
+        await startBrowser()
+      }
     }
     return buildSnapshot()
   })
   controlQueue = operation.then(() => undefined, () => undefined)
   return operation
+}
+
+async function monitorPlayback() {
+  if (playbackMonitorRunning || !resumeOnStart) return
+  playbackMonitorRunning = true
+  try {
+    if (playlistId && Date.now() - lastPlaylistCheckAt >= HEARTBEAT_INTERVAL_MS) {
+      lastPlaylistCheckAt = Date.now()
+      const activePlaylist = await prisma.playlist.findUnique({
+        where: { id: playlistId },
+        include: { videos: { orderBy: { position: 'asc' }, select: { videoId: true } } },
+      })
+      const currentVideoIds = activePlaylist?.videos.map((item) => item.videoId) ?? []
+      const playlistChanged = !activePlaylist
+        || currentVideoIds.length !== playlistItems.length
+        || currentVideoIds.some((id, index) => id !== playlistItems[index]?.id)
+      if (playlistChanged) {
+        const deletedPlaylistId = playlistId
+        if (!activePlaylist) {
+          playbackSessionId = null
+          playlistId = null
+          currentVideoId = null
+        } else if (!currentVideoIds.includes(currentVideoId ?? '')) {
+          currentVideoId = null
+        }
+        const message = activePlaylist
+          ? 'The active playlist changed; remote playback was stopped.'
+          : 'The active playlist was deleted; remote playback was stopped.'
+        lastError = message
+        embedStatus = 'ERROR'
+        if (playbackSessionId) {
+          await finishPlaybackSession('ERROR', message)
+          await writePlaybackEvent('ERROR')
+        } else {
+          resumeOnStart = false
+          playbackStatus = 'ERROR'
+          await writeStatus()
+        }
+        await stopBrowser()
+        await writeLog('WARN', 'playback_playlist_changed', `Remote playback stopped because playlist ${deletedPlaylistId} was changed or deleted.`)
+        return
+      }
+    }
+
+    if (page && playbackStatus === 'PLAYING') {
+      const observedPosition = await page.evaluate(() => {
+        const player = (window as RemotePlayerWindow).__remotePlayer
+        try {
+          return player ? player.getCurrentPosition() : null
+        } catch {
+          return null
+        }
+      })
+      if (typeof observedPosition === 'number' && Number.isFinite(observedPosition) && observedPosition >= 0) {
+        currentTimeSeconds = observedPosition
+      }
+    }
+
+    if (playbackStatus === 'STARTING' && Date.now() - loadStartedAt >= 30_000) {
+      const message = 'No playback-start event was received. Facebook or Chromium may require an explicit user gesture or the embed may be unavailable.'
+      await finishPlaybackSession('ERROR', message)
+      await writePlaybackEvent('ERROR')
+      await writeLog('WARN', 'playback_start_not_observed', message)
+      return
+    }
+
+  } catch (error) {
+    const message = sanitizeDiagnostic(error instanceof Error ? error.message : 'Playback health check failed.')
+    lastError = message
+    await writeStatus()
+    await writeLog('ERROR', 'playback_health_check_failed', message)
+  } finally {
+    playbackMonitorRunning = false
+  }
 }
 
 function matchesApiToken(value: string | undefined) {
@@ -369,7 +917,14 @@ const server = createServer((request, response) => {
         sendJson(response, 400, { error: 'A valid runtime command is required.' })
         return
       }
-      sendJson(response, 200, await executeCommand(body.command as RuntimeCommand))
+      const playlistIdFromBody = 'playlistId' in body && typeof body.playlistId === 'string'
+        ? body.playlistId
+        : undefined
+      if (body.command === 'start' && !playlistIdFromBody) {
+        sendJson(response, 400, { error: 'Pilih playlist untuk memulai remote playback.' })
+        return
+      }
+      sendJson(response, 200, await executeCommand(body.command as RuntimeCommand, playlistIdFromBody))
       return
     }
 
@@ -385,6 +940,7 @@ async function shutdown(signal: string) {
   if (shuttingDown) return
   shuttingDown = true
   if (heartbeatTimer) clearInterval(heartbeatTimer)
+  if (playbackMonitorTimer) clearInterval(playbackMonitorTimer)
   if (recoveryTimer) clearTimeout(recoveryTimer)
   try {
     processState = 'STOPPING'
@@ -412,6 +968,23 @@ async function shutdown(signal: string) {
 }
 
 async function main() {
+  const saved = await prisma.remoteRuntimeStatus.findUnique({ where: { id: STATUS_ID } })
+  if (saved) {
+    browserState = 'CLOSED'
+    chromiumVersion = saved.chromiumVersion
+    browserStartedAt = null
+    lastError = saved.lastError
+    playbackStatus = saved.playbackStatus
+    embedStatus = saved.embedStatus
+    playlistId = saved.playlistId
+    currentVideoId = saved.currentVideoId
+    currentPosition = saved.currentPosition
+    currentTimeSeconds = saved.currentTimeSeconds
+    playbackStartedAt = saved.playbackStartedAt
+    lastPlaybackEventAt = saved.lastPlaybackEventAt
+    resumeOnStart = saved.resumeOnStart
+    playbackSessionId = saved.playbackSessionId
+  }
   processStartedAt = new Date()
   lastHeartbeatAt = new Date()
   await writeStatus()
@@ -424,11 +997,21 @@ async function main() {
       await writeLog('INFO', 'runtime_online', `Runtime health API is listening on ${INTERNAL_HOST}:${runtimePort}.`)
       heartbeatTimer = setInterval(() => {
         lastHeartbeatAt = new Date()
-        void writeStatus().catch((error: unknown) => {
+        void Promise.all([
+          writeStatus(),
+          resumeOnStart && ['STARTING', 'PLAYING', 'PAUSED'].includes(playbackStatus)
+            ? updatePlaybackSession(playbackStatus === 'PAUSED' ? 'PAUSED' : 'ACTIVE')
+            : Promise.resolve(),
+        ]).catch((error: unknown) => {
           console.error('Runtime heartbeat failed:', sanitizeDiagnostic(error instanceof Error ? error.message : 'Database write failed.'))
         })
       }, HEARTBEAT_INTERVAL_MS)
       heartbeatTimer.unref()
+      playbackMonitorTimer = setInterval(() => {
+        void monitorPlayback()
+      }, 1_000)
+      playbackMonitorTimer.unref()
+      await resumePersistedPlayback()
     })().catch((error: unknown) => {
       console.error('Runtime initialization failed:', sanitizeDiagnostic(error instanceof Error ? error.message : 'Unknown startup error.'))
       process.exitCode = 1

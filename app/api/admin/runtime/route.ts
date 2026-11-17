@@ -7,6 +7,7 @@ export const runtime = 'nodejs'
 
 const commandSchema = z.object({
   command: z.enum(['start', 'stop', 'restart', 'health']),
+  playlistId: z.string().min(1).max(64).optional(),
 })
 
 class RuntimeServiceError extends Error {}
@@ -53,7 +54,13 @@ async function callRuntime(path: '/health' | '/control', method: 'GET' | 'POST',
 
 async function offlineSnapshot(error: string): Promise<RemoteRuntimeSnapshot> {
   const [status, logs] = await Promise.all([
-    prisma.remoteRuntimeStatus.findUnique({ where: { id: 'primary' } }),
+    prisma.remoteRuntimeStatus.findUnique({
+      where: { id: 'primary' },
+      include: {
+        playlist: { select: { name: true, videos: { select: { id: true } } } },
+        currentVideo: { select: { title: true } },
+      },
+    }),
     prisma.remoteRuntimeLog.findMany({
       take: 10,
       orderBy: { createdAt: 'desc' },
@@ -72,8 +79,15 @@ async function offlineSnapshot(error: string): Promise<RemoteRuntimeSnapshot> {
     browserStartedAt: status?.browserStartedAt?.toISOString() ?? null,
     lastHeartbeatAt: status?.lastHeartbeatAt?.toISOString() ?? null,
     currentPage: status?.currentPage ?? null,
-    embedStatus: 'NOT_LOADED',
-    playbackStatus: 'NOT_OBSERVED',
+    embedStatus: status?.resumeOnStart ? 'UNKNOWN' : status?.embedStatus ?? 'NOT_LOADED',
+    playbackStatus: status?.resumeOnStart ? 'UNKNOWN' : status?.playbackStatus ?? 'IDLE',
+    currentPlaylistName: status?.playlist?.name ?? null,
+    currentContentTitle: status?.currentVideo?.title ?? null,
+    currentPosition: status ? status.currentPosition + 1 : 0,
+    playlistLength: status?.playlist?.videos.length ?? 0,
+    currentTimeSeconds: status?.currentTimeSeconds ?? 0,
+    playbackStartedAt: status?.playbackStartedAt?.toISOString() ?? null,
+    lastPlaybackEventAt: status?.lastPlaybackEventAt?.toISOString() ?? null,
     lastError: error,
     logs: logs.map((log) => ({ ...log, createdAt: log.createdAt.toISOString() })),
   }
@@ -130,10 +144,16 @@ export async function POST(request: Request) {
   }
   const parsed = commandSchema.safeParse(body)
   if (!parsed.success) return jsonResponse({ error: 'Invalid runtime command.' }, 400)
+  if (parsed.data.command === 'start' && !parsed.data.playlistId) {
+    return jsonResponse({ error: 'Pilih playlist untuk memulai remote playback.' }, 400)
+  }
 
   try {
     if (parsed.data.command === 'health') return jsonResponse(await callRuntime('/health', 'GET'))
-    return jsonResponse(await callRuntime('/control', 'POST', { command: parsed.data.command }))
+    const commandBody = parsed.data.command === 'start'
+      ? { command: parsed.data.command, playlistId: parsed.data.playlistId }
+      : { command: parsed.data.command }
+    return jsonResponse(await callRuntime('/control', 'POST', commandBody))
   } catch (error) {
     if (!(error instanceof RuntimeServiceError)) throw error
     return jsonResponse({ error: error.message }, 503)

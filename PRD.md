@@ -1,6 +1,6 @@
 # Product Requirements Document — Facebook Video Player
 
-**Status:** Draft / requirements baseline  
+**Status:** As-built repository snapshot; see section 14 for implementation and deployment status
 **Last updated:** November 16, 2026  
 **Product name:** Facebook Video Player  
 **Document language:** Indonesian  
@@ -68,65 +68,63 @@ Menampilkan ringkasan yang berasal dari database:
 
 - Total video.
 - Total playlist.
-- Jumlah video yang selesai diputar dalam konteks aplikasi (bukan jumlah view Facebook).
-- Status player/sesi aktif.
-- Video dan playlist pada sesi aktif bila ada.
-- Aktivitas aplikasi terbaru.
-- Playlist aktif dan akses cepat ke tambah video, buat playlist, player, serta riwayat.
+- Jumlah event `FINISHED_PLAYING` yang tersimpan di database (bukan jumlah view Facebook); saat halaman dashboard terbuka, angka disinkronkan otomatis setiap 10 detik.
+- Jumlah sesi player dengan heartbeat dalam lima menit terakhir; jumlah ini disinkronkan tiap 30 detik dan bukan indikator bahwa video sedang berjalan.
+- Empat aktivitas aplikasi terbaru yang tersedia di state dashboard.
+- Tiga playlist terbaru dan akses cepat ke tambah video, buat playlist, player, serta riwayat.
 
 State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas produksi yang direkayasa.
+Angka selesai hanya berubah setelah event selesai diterima dari embed Facebook; pemutaran yang tidak melaporkan event tidak dihitung.
 
 ### 4.3 Manajemen Video — `/dashboard/videos`
 
-- Daftar video dengan pagination, pencarian, dan filter status.
-- Tambah video melalui dialog; URL wajib, judul opsional.
-- Edit judul dan informasi video, lihat detail/preview, hapus dengan konfirmasi, dan tambahkan ke playlist.
-- Validasi server-side atas URL, host yang diperbolehkan (domain Facebook yang didukung, termasuk `fb.watch` bila dapat di-embed), serta URL duplikat dalam cakupan pengguna.
-- Simpan judul, URL Facebook, ID video bila dapat diambil secara valid, thumbnail bila disediakan secara sah, status embed, dan timestamp.
+- Daftar video dapat dicari berdasarkan judul atau URL, menampilkan status embed, dan menyediakan tautan untuk membuka video di Facebook.
+- Video dapat ditambahkan melalui dialog dengan URL wajib dan judul opsional, lalu dihapus.
+- Video dapat ditambahkan ke atau dikeluarkan dari playlist terpilih.
+- URL divalidasi di server dan dibatasi ke HTTPS pada host Facebook yang didukung, termasuk `fb.watch`.
+- Edit metadata, pagination, dan filter status belum tersedia.
 - Status embed bukan jaminan permanen: izin, audience, dan konfigurasi pemilik video dapat berubah.
 
 ### 4.4 Playlist — `/dashboard/playlists`
 
-- Buat, ganti nama, edit deskripsi, aktifkan/nonaktifkan, dan hapus playlist.
-- Lihat jumlah video dan tanggal pembuatan/pembaruan.
-- Tambah/hapus video dari playlist.
-- Urutkan item melalui drag-and-drop; perubahan urutan disimpan secara transaksional dan tetap ada setelah reload.
-- Detail playlist berada pada `/dashboard/playlists/[id]`.
-- Detail menyediakan tambah video, simpan urutan, mulai pemutaran, edit, dan hapus.
-- Playlist kosong dan urutan bersamaan harus ditangani dengan jelas.
+- Playlist dapat dibuat dengan nama dan deskripsi, dipilih untuk melihat isinya, dan dihapus.
+- Penghapusan playlist meminta konfirmasi dan menghapus seluruh sesi pemutaran beserta log yang terkait; jumlah event selesai dapat berkurang.
+- Video dapat ditambahkan ke atau dikeluarkan dari playlist.
+- Playlist kosong ditampilkan dengan empty state.
+- Ganti nama, edit deskripsi setelah dibuat, drag-and-drop/reorder, dan halaman detail playlist terpisah belum tersedia.
 
 ### 4.5 Pemutar — `/dashboard/player`
 
-- Pilih playlist dan item video.
-- Tampilkan player Facebook resmi dengan rasio 16:9, judul, urutan, status/loading/error, dan daftar antrian.
-- Sediakan kontrol aplikasi untuk video sebelumnya/berikutnya dan pemilihan item. Kontrol play/pause/fullscreen hanya disediakan bila didukung oleh API embed resmi.
-- Tandai item terpilih, item berikutnya, dan item yang selesai hanya bila sinyal tersebut benar-benar tersedia.
-- Pengaturan auto-advance, loop, shuffle, dan autoplay adalah preferensi—bukan jaminan bahwa browser/Facebook akan memulai playback otomatis.
-- Bila event selesai tersedia: cek preferensi auto-advance, muat video selanjutnya, dan tampilkan fallback “Lanjutkan” bila kebijakan browser mengharuskan interaksi pengguna.
-- Jangan mengklaim kemampuan event/kontrol yang tidak tersedia. Autoplay bersuara tidak boleh diasumsikan.
+- Pilih playlist, pilih item, dan gunakan pemutar embed resmi Facebook dalam mode tunggal atau tampilan serentak.
+- Pemutar tunggal menyediakan kontrol aplikasi untuk memilih video sebelumnya/berikutnya serta daftar antrian.
+- Autoplay, lanjut otomatis, loop, shuffle, suara dibisukan, dan batas jumlah pemutar bersamaan adalah preferensi tersimpan; browser atau Facebook dapat meminta klik manual.
+- Loop untuk satu video mengulang item yang sama ketika event selesai diterima; playlist beberapa video dapat maju atau kembali ke awal sesuai preferensi.
+- Pemutaran bergantung pada event embed yang benar-benar dikirim Facebook. Pemutar tidak menjanjikan autoplay atau status playback yang tidak teramati.
+- Pemutar dashboard tetap bergantung pada tab administrator. Remote runtime adalah sesi browser terpisah di VPS dan tidak bergantung pada tab dashboard.
 
 ### 4.6 Riwayat — `/dashboard/history`
 
-- Mencatat event aplikasi yang benar-benar diterima/diamati, antara lain sesi dimulai/dihentikan, video dimuat, playback mulai/jeda/selesai, video berikutnya dimuat, dan error.
-- Menampilkan waktu, judul video, playlist, jenis event, dan status sesi.
-- Pencarian, filter tanggal/playlist/jenis event, dan pagination.
+- Menampilkan hingga 30 event aplikasi terbaru yang tersedia, termasuk sesi dimulai/dihentikan, video dimuat, playback selesai, dan video berikutnya dimuat.
+- Menampilkan waktu, judul video, playlist, dan jenis event.
+- Pencarian, filter, pagination, serta tampilan terpisah untuk status sesi belum tersedia.
 - Data ini tidak disebut sebagai statistik view resmi Facebook; event yang tidak dapat diamati tidak boleh disimpulkan.
 
 ### 4.7 Pengaturan — `/dashboard/settings`
 
-- Preferensi pemutaran: auto-advance, loop, shuffle, autoplay, serta perilaku sesudah video terakhir.
-- Pengaturan aplikasi: nama, zona waktu, format tanggal, preferensi tampilan.
-- Pengaturan akun: nama administrator, email, ubah password, dan logout.
-- Semua pengaturan tersimpan di PostgreSQL dan dibatasi pada administrator.
+- Preferensi pemutaran dan batas pemutaran serentak disimpan di PostgreSQL.
+- Nama aplikasi dan zona waktu ditampilkan sebagai nilai read-only.
+- Informasi administrator dan logout ditampilkan; ubah profil/password melalui halaman ini belum tersedia.
 
 ### 4.8 Remote Browser Runtime
 
 - Runtime service terpisah di VPS dikelola PM2; prosesnya tetap berjalan saat browser administrator ditutup.
-- `/dashboard/player` menampilkan status service, Chromium, versi browser, uptime, heartbeat, halaman saat ini, error terakhir, dan log diagnostik.
+- `/dashboard/player` menampilkan status service, Chromium, playback engine, embed, playlist/konten/posisi, waktu playback teramati, uptime, heartbeat, error terakhir, dan log diagnostik.
 - Kontrol administrator memulai, menghentikan, memulai ulang Chromium, atau meminta health check melalui route server yang memeriksa sesi.
 - API runtime hanya bind ke loopback dan memerlukan secret bersama antara aplikasi dan service.
-- Runtime hanya membuka halaman kosong untuk pemeriksaan operasional. Runtime tidak membuka atau memutar embed Facebook, tidak mencatat `PlaybackSession`/`PlaybackLog`, dan status runtime bukan status playback.
-- Pemutar Facebook existing tetap berjalan di browser dashboard; event hanya dicatat oleh integrasi embed existing jika benar-benar diamati.
+- Start memuat konten tersimpan pada Facebook Embedded Video Player/JavaScript SDK resmi di Chromium VPS. Preferensi `autoPlayNext` mengatur perpindahan item; `loopPlaylist` menentukan apakah item/playlist berhenti setelah selesai atau diputar terus-menerus. Preferensi terbaru dibaca pada setiap transisi selesai.
+- Runtime tidak menggunakan akun Facebook, cookie administrator, autoplay-policy flags, atau bypass untuk menghindari penolakan kebijakan. Facebook/browser dapat menolak autoplay; bila sinyal mulai tidak teramati, runtime menandai error dan tidak mengklaim video diputar.
+- `PlaybackSession` dan `PlaybackLog` runtime menggunakan tabel existing. Event mulai, jeda, selesai, error, dan posisi hanya dicatat ketika sinyal resmi embed teramati; bukan statistik atau bukti engagement Facebook.
+- Playlist, posisi, waktu, dan sesi aktif disimpan untuk melanjutkan setelah runtime restart/crash. Stop mengakhiri sesi dan menutup browser dengan tertib.
 
 ## 5. Navigasi dan Desain UX
 
@@ -149,7 +147,7 @@ State awal harus memiliki empty state yang jujur, bukan angka atau aktivitas pro
 
 ## 6. Model Data Target
 
-Model berikut didefinisikan di `prisma/schema.prisma`. Enam migration tersedia di `prisma/migrations/0001_initial` hingga `0006_playback_session_heartbeat`. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
+Model berikut didefinisikan di `prisma/schema.prisma`. Tujuh migration tersedia di `prisma/migrations/0001_initial` hingga `0007_remote_browser_playback`. Pada database existing yang dibuat sebelum migration history, verifikasi schema awal lalu baseline `0001_initial` sebelum menjalankan `prisma migrate deploy`.
 
 ### `User`, `Session`, `Account`, `Verification`
 
@@ -166,6 +164,7 @@ Model berikut didefinisikan di `prisma/schema.prisma`. Enam migration tersedia d
 ### `Playlist`
 
 - `id`, `name`, `description` nullable, `isActive`, `createdAt`, `updatedAt`.
+- Server menghapus sesi dan log yang terkait dalam transaksi sebelum menghapus playlist.
 
 ### `PlaylistVideo`
 
@@ -176,7 +175,7 @@ Model berikut didefinisikan di `prisma/schema.prisma`. Enam migration tersedia d
 ### `PlaybackSession`
 
 - `id`, `playlistId`, `currentVideoId` nullable, `status`, `startedAt`, `lastHeartbeatAt`, `endedAt` nullable, `createdAt`.
-- Ringkasan hanya menghitung sesi dengan heartbeat dalam lima menit terakhir; heartbeat menandakan tab pemutar masih terhubung, bukan bahwa video Facebook sedang diputar.
+- Ringkasan hanya menghitung sesi dengan heartbeat dalam lima menit terakhir; heartbeat menandakan sesi aplikasi terhubung, bukan bukti view Facebook. Runtime menggunakan model sesi yang sama.
 
 ### `PlaybackLog`
 
@@ -191,6 +190,7 @@ Model berikut didefinisikan di `prisma/schema.prisma`. Enam migration tersedia d
 ### `RemoteRuntimeStatus`, `RemoteRuntimeLog`
 
 - `RemoteRuntimeStatus` menyimpan status proses dan browser, versi Chromium, waktu mulai, heartbeat terakhir, halaman browser, dan error terakhir.
+- Migration `0007` menambah status embed/playback, playlist/video aktif, posisi, waktu terakhir, flag pemulihan, dan relasi ke `PlaybackSession`.
 - `RemoteRuntimeLog` menyimpan event operasional yang sudah disanitasi; bukan event playback.
 - Log runtime dibatasi ke 200 baris terbaru.
 
@@ -266,8 +266,8 @@ Semua endpoint memerlukan autentikasi/otorisasi dan validasi request dengan Zod.
 - Server: Server Actions terautentikasi menangani video, playlist, preferensi, dan event pemutaran; layout dashboard memuat data melalui Prisma.
 - Data: PostgreSQL melalui Prisma 7 dan `@prisma/adapter-pg`; deployment harus menerapkan migration dengan `prisma migrate deploy`.
 - Validasi: input login, URL, playlist, dan preferensi divalidasi server-side dengan Zod. URL video dibatasi HTTPS dan host Facebook yang didukung.
-- Embed menggunakan Facebook JavaScript SDK; event `xfbml.ready` dan `finishedPlaying` dicatat hanya pada pemutar tunggal. Pengulangan satu-video tetap melakukan seek/play ketika `autoPlayNext` dan loop aktif bersamaan.
-- Remote Browser Runtime menggunakan proses Node terpisah, Playwright/Chromium headless, PM2, heartbeat PostgreSQL, dan recovery terbatas saat Chromium crash. Runtime tidak mengotomatiskan playback.
+- Embed menggunakan Facebook JavaScript SDK; event `xfbml.ready`, `startedPlaying`, `paused`, `finishedPlaying`, dan `error` didukung untuk pemutar yang relevan. Dashboard mempertahankan preferensi loopnya sendiri.
+- Remote Browser Runtime menggunakan proses Node terpisah, Playwright/Chromium headless, PM2, heartbeat PostgreSQL, penyimpanan posisi, pemulihan terbatas saat Chromium crash, dan playback playlist melalui SDK resmi mengikuti preferensi `autoPlayNext` serta `loopPlaylist`. Pengulangan hanya mengikuti pilihan administrator untuk konten yang diizinkan, bukan untuk memanipulasi metrik.
 - Hosting target: Ubuntu VPS, Node.js, environment variables, reverse proxy Nginx; Docker opsional.
 - Header keamanan dasar dikonfigurasi pada Next.js. Rahasia dan konfigurasi hanya berasal dari environment/secret store, tidak di-commit.
 
@@ -289,7 +289,7 @@ Untuk database existing yang tabelnya dibuat sebelum Prisma migration history te
 6. Restart proses Next.js existing setelah environment/migration siap. Jangan menambah port 3012 ke Nginx/firewall; service bind hanya ke `127.0.0.1`.
 7. Periksa status melalui `/dashboard/player`, dan gunakan `pm2 status`, `pm2 logs facebook-video-player-runtime --lines 100` untuk operasi VPS.
 
-PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihkan Chromium maksimal tiga kali dalam lima menit. Tombol Start/Stop/Restart mengendalikan sesi Chromium, bukan menghentikan daemon PM2, agar dashboard tetap dapat menghubunginya. Restart service Next.js tidak diperlukan untuk mengendalikan browser. Runtime service yang online membuka halaman kosong saja—bukan embed, bukan playback, dan bukan view Facebook. Browser administrator dapat ditutup tanpa menghentikan service; pemutar Facebook existing tetap memerlukan halaman browser dashboard terbuka.
+PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihkan Chromium maksimal tiga kali dalam lima menit. Tombol Start/Stop/Restart mengendalikan sesi playback/browser, bukan menghentikan daemon PM2, agar dashboard tetap dapat menghubunginya. Restart service Next.js tidak diperlukan untuk mengendalikan browser. Mode sekali/berulang mengikuti preferensi tersimpan administrator. Menutup dashboard tidak menghentikan daemon atau sesi Chromium; namun keberhasilan playback tidak dijamin dan tidak boleh disebut sebagai view Facebook.
 
 ## 12. Kriteria Penerimaan Rilis Produksi
 
@@ -320,18 +320,18 @@ PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihka
 - Layout dan alur penting diuji pada desktop, tablet, dan mobile.
 - Backup, restore, HTTPS, environment secrets, dan prosedur deployment VPS terdokumentasi dan diuji.
 - Runtime API hanya dapat dicapai melalui loopback dan memerlukan autentikasi admin di sisi Next.js serta secret service-ke-service.
-- Status runtime/browser, heartbeat, uptime, Chromium version, recovery, dan error dibedakan dari embed/playback; runtime tidak membuat event playback.
+- Status runtime/browser, heartbeat, uptime, Chromium version, recovery, embed, dan playback dibedakan. Event playback hanya berasal dari sinyal embed yang teramati; tidak ada loop remote atau klaim view/engagement.
 
 ## 13. Tahapan Implementasi
 
-1. **Foundation (sebagian):** schema Prisma, adapter PostgreSQL, dan enam migration tersedia; penerapan migration produksi masih perlu dilakukan.
-2. **Authentication (implementasi awal):** login/logout, sesi database, proteksi halaman/mutasi, dan pembatasan percobaan login tersedia.
-3. **Dashboard shell:** dashboard membaca ringkasan dari PostgreSQL.
-4. **Content management (sebagian):** tambah/hapus video, playlist, dan keanggotaan video tersimpan; edit, filter, pagination, serta reorder belum tersedia.
-5. **Facebook player (sebagian):** embed resmi dipakai; event yang tersedia pada pemutar tunggal dicatat.
-6. **History and settings (sebagian):** riwayat event pemutar tunggal dan preferensi dasar tersimpan; filter riwayat dan semua pengaturan aplikasi belum tersedia.
-7. **Remote runtime:** service Playwright/Chromium, kontrol, status, heartbeat, recovery terbatas, dan persistence PostgreSQL tersedia; deployment serta PM2 startup pada VPS masih perlu diverifikasi.
-8. **Production:** pengujian end-to-end, penerapan migration, deployment VPS, dan runbook masih perlu diverifikasi.
+1. **Foundation:** schema Prisma, PostgreSQL, dan enam migration tersedia; migration `0006` telah diterapkan pada VPS menurut log deployment.
+2. **Authentication:** login/logout, sesi database, proteksi halaman/mutasi, dan pembatasan percobaan login tersedia.
+3. **Dashboard:** ringkasan berasal dari PostgreSQL; jumlah event selesai polling setiap 10 detik dan sesi terhubung polling setiap 30 detik.
+4. **Content management:** tambah/cari/hapus video, buat/hapus playlist, dan kelola keanggotaan video tersedia. Penghapusan playlist menghapus sesi dan log terkait.
+5. **Facebook player:** embed resmi digunakan; playback bergantung pada interaksi pengguna, kebijakan Facebook/browser, dan event yang diterima.
+6. **History and settings:** riwayat aplikasi terbaru dan preferensi pemutaran tersedia; filter riwayat dan pengubahan pengaturan aplikasi belum tersedia.
+7. **Remote runtime:** implementasi service Playwright/Chromium, kontrol, status, heartbeat, playback playlist melalui SDK resmi, persistence posisi PostgreSQL, dan recovery terbatas tersedia di repository. Uji playback aktual memerlukan deployment dengan migration terbaru dan harus dicatat terpisah.
+8. **Deployment:** versi repository terbaru harus dibuild dan direstart agar tersedia di VPS; startup PM2 setelah reboot perlu diverifikasi.
 
 ## 14. Status Implementasi Saat Ini
 
@@ -339,19 +339,25 @@ PM2 menghidupkan kembali proses runtime setelah crash; runtime mencoba memulihka
 
 - `/dashboard` mewajibkan sesi administrator. Login memakai `ADMIN_EMAIL`, `ADMIN_PASSWORD`, dan `BETTER_AUTH_SECRET`; sesi tersimpan di tabel `Session` dan cookie HTTP-only/Secure pada production. Tidak ada registrasi publik.
 - Dashboard memuat video, playlist, pengaturan, dan ringkasan aktivitas dari PostgreSQL melalui Prisma. Mutasi dilakukan dengan Server Actions yang memeriksa sesi dan memvalidasi input.
-- Video dapat ditambahkan/dihapus; playlist dapat dibuat/dihapus dan item video dapat ditambahkan/dikeluarkan. Preferensi pemutaran disimpan di `AppSettings`.
+- Kartu `Video selesai` menghitung event `FINISHED_PLAYING` yang tersimpan dan menyinkronkan nilainya tiap 10 detik saat `/dashboard` terbuka. Ini hitungan event aplikasi, bukan analitik Facebook.
+- Kartu sesi terhubung menghitung sesi dengan heartbeat dalam lima menit terakhir dan disinkronkan tiap 30 detik.
+- Video dapat ditambahkan, dicari, dihapus, dan dimasukkan/dikeluarkan dari playlist. Playlist dapat dibuat dan dihapus. Hapus playlist meminta konfirmasi, menghapus sesi/log terkait, dan dapat mengurangi hitungan event selesai.
 - Pemutar tunggal mencatat `SESSION_STARTED`, `VIDEO_LOADED`, `NEXT_VIDEO_LOADED`, `FINISHED_PLAYING`, dan `SESSION_STOPPED` saat event yang didukung diamati. Ini bukan statistik tayangan Facebook.
-- Remote runtime terpisah tersedia melalui `runtime/server.ts` dan konfigurasi PM2. Kontrolnya mengelola browser Chromium kosong dan health operasional; tidak menjalankan embed atau menulis event playback.
+- Autoplay dapat memerlukan klik manual; pengaturan autoplay/loop tidak mengatasi penolakan kebijakan Facebook atau browser.
+- Remote runtime terpisah tersedia melalui `runtime/server.ts` dan konfigurasi PM2. Start memuat playlist ke embed resmi, mencatat event SDK yang benar-benar teramati, mengikuti `autoPlayNext` dan `loopPlaylist`, serta menyimpan posisi. Tidak ada akun/cookie, bypass autoplay, atau klaim metrik Facebook.
 - `/api/admin/runtime` memeriksa sesi admin, memvalidasi perintah, melakukan origin check pada mutasi, dan mem-proxy ke service loopback dengan bearer token.
-- Migration `0002`–`0004` mengubah preferensi, rate limit login, dan URL duplikat; `0005_remote_browser_runtime` menambahkan status serta log operasional runtime; `0006_playback_session_heartbeat` menyinkronkan jumlah sesi melalui heartbeat.
+- Migration `0002`–`0004` mengubah preferensi, rate limit login, dan URL duplikat; `0005_remote_browser_runtime` menambahkan status serta log operasional runtime; `0006_playback_session_heartbeat` menyinkronkan jumlah sesi melalui heartbeat; `0007_remote_browser_playback` menambah state playback remote yang persisten.
+- VPS telah menerapkan migration `0006_playback_session_heartbeat` menurut log deployment. Perubahan repository setelah deployment perlu dibuild dan direstart sebelum tersedia di VPS.
 
 ### Belum tersedia
 
-- Edit metadata video/playlist, drag-and-drop reorder, filter/pagination, dan pengaturan aplikasi yang dapat diedit.
+- Edit metadata video/playlist, drag-and-drop reorder, pagination/filter daftar, dan pengaturan aplikasi yang dapat diedit.
 - Pencatatan lifecycle pemutaran untuk tampilan serentak; hanya event pemutar tunggal yang dicatat.
 - Pengujian end-to-end dan konfigurasi rate-limit yang mempercayai IP dari reverse proxy harus diverifikasi pada VPS.
 - Runtime dan Chromium telah berhasil dijalankan pada VPS Rocky Linux 8 sebagai user non-root; konfigurasi PM2 untuk startup setelah reboot masih perlu diverifikasi.
-- Remote runtime tidak membuka Facebook embed dan tidak memainkan video setelah browser administrator ditutup. Pemutar embed existing tetap memerlukan tab browser terbuka.
+- Integrasi remote playback baru belum diuji atau dideploy pada VPS. Autoplay/akses embed bisa ditolak oleh Facebook atau Chromium; jika demikian, manual interaction mungkin tetap diperlukan dan runtime harus menunjukkan status error, bukan memalsukan event.
+- Startup PM2 setelah reboot, recovery dari crash, dan hasil tes playback aktual harus diverifikasi pada server setelah migration `0007` diterapkan. Saat ini hanya pemeriksaan lokal TypeScript/unit test yang dapat diklaim.
+- Perubahan repository terbaru untuk polling jumlah video selesai dan penghapusan playlist beserta riwayat belum didorong/dideploy ke VPS.
 
 ### Konfigurasi dan deployment
 
@@ -361,8 +367,9 @@ Sediakan `DATABASE_URL`, `BETTER_AUTH_SECRET` (minimal 32 karakter), `ADMIN_EMAI
 
 - Facebook dapat mengubah API, kebijakan, atau ketersediaan embed; integrasi harus diverifikasi ulang saat implementasi.
 - Autoplay dipengaruhi gesture pengguna, audio, browser, dan Facebook; UI harus selalu memiliki fallback manual.
-- Remote Browser Runtime hanya menyediakan lifecycle Chromium dan health operasional. Browser runtime saat ini tidak terintegrasi untuk memuat Facebook embed; menutup browser administrator tidak menghentikan daemon, tetapi juga tidak membuat video terus diputar.
+- Remote Browser Runtime dapat memuat playlist lewat embed resmi secara terpisah dari dashboard, tetapi tidak dapat menjamin autoplay headless, akses konten, atau ketersediaan embed. Menutup browser administrator tidak menghentikan daemon; ini bukan jaminan pemutaran atau view berkelanjutan.
 - Kehidupan service PM2, status browser, ketersediaan embed, dan playback adalah status terpisah. Hanya sinyal dari player existing yang boleh menjadi event `PlaybackLog`.
+- Runtime mengikuti pilihan putar sekali atau berulang dari preferensi `loopPlaylist` yang sudah tersedia; `autoPlayNext` menentukan apakah beralih item atau mengulang item aktif. Sumber video harus berizin; tidak ada bypass autoplay/login, fake engagement, atau penghitungan view platform.
 - URL yang valid tidak membuktikan video dapat di-embed; status awal harus “belum diverifikasi” kecuali ada pemeriksaan yang sah.
 - Log aplikasi bukan analitik Facebook dan dapat tidak lengkap jika event tidak dikirim oleh embed.
 - Belum ada keputusan mengenai retensi log, single-admin versus multi-admin, kebijakan backup, serta domain production.
